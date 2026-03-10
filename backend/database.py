@@ -77,6 +77,39 @@ async def init_db():
                 win_count INTEGER DEFAULT 0, loss_count INTEGER DEFAULT 0,
                 leverage_multiplier INTEGER DEFAULT 2
             );
+
+            -- ── Self-Improvement Engine Tables ────────────────────────────────
+            -- Records every closed trade result for the learning loop
+            CREATE TABLE IF NOT EXISTS signal_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER,
+                market_type TEXT,
+                direction TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                pnl REAL,
+                won INTEGER DEFAULT 0,
+                signal_factors_json TEXT DEFAULT '{}',
+                created_at TEXT
+            );
+
+            -- Stores current dynamic thresholds and enabled/disabled state per strategy
+            CREATE TABLE IF NOT EXISTS strategy_params (
+                param_name TEXT PRIMARY KEY,
+                param_value TEXT,
+                updated_at TEXT
+            );
+
+            -- Audit log of every parameter change the engine makes, with reasoning
+            CREATE TABLE IF NOT EXISTS improvement_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                overall_win_rate REAL,
+                gap_to_target REAL,
+                stats_json TEXT,
+                changes_json TEXT,
+                created_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS crypto_trade_meta (
                 trade_id INTEGER PRIMARY KEY, snapshot_json TEXT,
                 FOREIGN KEY (trade_id) REFERENCES crypto_trades(id)
@@ -704,4 +737,15 @@ async def set_live_balance(balance: float):
         await db.execute(
             "UPDATE live_portfolio SET cash_balance=? WHERE id=1", (balance,)
         )
+        await db.commit()
+
+
+async def set_signal_weights(weights: dict):
+    """Update signal factor weights — called by self-improvement engine."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for factor, weight in weights.items():
+            await db.execute("""
+                INSERT INTO signal_weights (factor, weight) VALUES (?, ?)
+                ON CONFLICT(factor) DO UPDATE SET weight = excluded.weight
+            """, (factor, weight))
         await db.commit()
