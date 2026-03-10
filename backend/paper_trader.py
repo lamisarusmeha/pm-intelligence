@@ -32,6 +32,7 @@ from typing import Optional, Tuple
 
 import database as db
 from trade_explainer import explain_entry, explain_exit, generate_lesson
+import self_improvement_engine as sie
 
 
 def _market_days_left(market: Optional[dict]) -> float:
@@ -277,6 +278,31 @@ async def _close_at_price(trade: dict, exit_price: float, reason: str):
         await db.resolve_signal(trade["signal_id"], outcome, pnl_pct)
     except Exception:
         pass
+
+    # ── SELF-IMPROVEMENT: Record result and trigger learning cycle ─────────────
+    try:
+        factors = {}
+        try:
+            expls = await db.get_trade_explanations(100)
+            for ex in expls:
+                if ex.get("trade_id") == trade_id:
+                    factors = ex.get("factors", {})
+                    break
+        except Exception:
+            pass
+
+        await sie.record_trade_result(
+            trade_id    = trade_id,
+            market_type = trade.get("market_type", "UNKNOWN"),
+            direction   = direction,
+            entry_price = trade.get("entry_price", 0),
+            exit_price  = exit_price,
+            pnl         = pnl,
+            won         = won,
+            signal_factors = factors,
+        )
+    except Exception as e:
+        print(f"[SELF-IMPROVE] Failed to record trade result: {e}")
 
     try:
         weights = await db.get_signal_weights()
