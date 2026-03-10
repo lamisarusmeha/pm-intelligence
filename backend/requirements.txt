@@ -7,3 +7,4 @@ websockets==12.0
 pydantic==2.6.0
 pydantic-core==2.16.1
 py-clob-client>=0.13.0
+anthropic>=0.39.0
