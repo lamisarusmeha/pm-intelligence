@@ -22,6 +22,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPExcept
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 import database as db
+import self_improvement_engine as sie
 from signal_engine import generate_signals
 from paper_trader import maybe_enter_trade, check_exits, maybe_enter_leverage_trade, check_leverage_exits
 from live_trader import maybe_enter_live_trade, check_live_exits, get_live_status
@@ -501,6 +502,29 @@ async def api_stats():
         }
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/api/learning")
+async def api_learning():
+    """
+    Self-improvement engine status.
+    Shows: overall WR, gap to 80% target, per-strategy stats,
+    current dynamic thresholds, and when next re-evaluation runs.
+    """
+    try:
+        return await sie.get_performance_summary()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/learning/retrain")
+async def api_force_retrain():
+    """Manually trigger the improvement cycle (don't need to wait for 20 trades)."""
+    try:
+        changes = await sie.run_improvement_cycle()
+        return {"ok": True, "changes": changes or []}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 @app.get("/api/leverage/portfolio")
 async def api_leverage_portfolio():
