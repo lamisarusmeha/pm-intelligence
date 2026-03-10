@@ -41,6 +41,7 @@ from typing import Optional, List, Tuple
 import database as db
 import news_engine
 import wallet_tracker
+import self_improvement_engine as sie
 
 # ── Mode detection thresholds ─────────────────────────────────────────────────
 
@@ -380,30 +381,41 @@ def _get_active_signals(factors: dict) -> List[str]:
     return [name for name, score in factors.items() if score >= STRONG_THRESHOLD]
 
 
-def _qualifies_for_entry(factors: dict, market_type: str) -> Tuple[bool, str]:
+def _qualifies_for_entry(
+    factors: dict, market_type: str,
+    copy_min: float = COPY_TRADE_WALLET_MIN,
+    lock_min: float = LOCK_IN_MIN_SCORE,
+    bne_min:  float = BUY_NO_EARLY_MIN_SCORE,
+    copy_on:    bool = True,
+    lock_on:    bool = True,
+    bne_on:     bool = True,
+    momentum_on: bool = False,
+) -> Tuple[bool, str]:
     """
     Returns (can_enter, reason_string).
 
-    HIGH ACCURACY MODE — only 3 modes active:
-    COPY_TRADE    → smart wallet ≥ 85: highest documented edge (~75-80% WR)
-    BUY_NO_EARLY  → behavioral bias ≥ 60: documented 78% NO base rate
-    LOCK_IN       → price_zone ≥ 65 + at least 1 supporting signal
-    MOMENTUM      → BLOCKED: 55-65% WR, drags overall rate below 80% target
-    EXTREME       → BLOCKED: no TP room
+    Thresholds are dynamically adjusted by self_improvement_engine.py
+    based on real win rate performance toward the 80% target.
+    Defaults match the original hardcoded values so behavior is unchanged
+    until enough data is collected to start learning.
     """
     # COPY_TRADE: smart wallet conviction — highest confidence mode
     if market_type == "COPY_TRADE":
+        if not copy_on:
+            return False, "COPY_TRADE_disabled_by_learner"
         score = factors.get("smart_wallet", 0)
-        if score >= COPY_TRADE_WALLET_MIN:
-            return True, f"COPY_TRADE(wallet={score:.0f})"
-        return False, "COPY_TRADE_wallet_low"
+        if score >= copy_min:
+            return True, f"COPY_TRADE(wallet={score:.0f},min={copy_min:.0f})"
+        return False, f"COPY_TRADE_wallet_low({score:.0f}<{copy_min:.0f})"
 
     # BUY_NO_EARLY: documented behavioral bias, always bet NO on overpriced YES
     if market_type == "BUY_NO_EARLY":
+        if not bne_on:
+            return False, "BUY_NO_EARLY_disabled_by_learner"
         score = factors.get("buy_no_early", 0)
-        if score >= BUY_NO_EARLY_MIN_SCORE:
-            return True, f"BUY_NO_EARLY(bias={score:.0f})"
-        return False, "BUY_NO_EARLY_score_low"
+        if score >= bne_min:
+            return True, f"BUY_NO_EARLY(bias={score:.0f},min={bne_min:.0f})"
+        return False, f"BUY_NO_EARLY_score_low({score:.0f}<{bne_min:.0f})"
 
     # EXTREME: blocked — no take-profit room
     if market_type == "EXTREME":
@@ -413,34 +425,37 @@ def _qualifies_for_entry(factors: dict, market_type: str) -> Tuple[bool, str]:
     count  = len(active)
     stack  = " + ".join(active)
 
-    # LOCK-IN: price_zone ≥ 65 required PLUS at least 1 supporting signal
-    # AND market must resolve within 14 days — farther-out markets sit stable
-    # and don't drift the 5¢ needed for TP within the hold window.
+    # LOCK-IN: price_zone ≥ lock_min required + supporting signal
     if market_type == "LOCK_IN":
-        days_left = factors.get("days_left", 9999)
+        if not lock_on:
+            return False, "LOCK_IN_disabled_by_learner"
 
-        # Reject markets resolving too far out — they sit stable, no TP drift
+        days_left = factors.get("days_left", 9999)
         if days_left > 14:
             return False, f"LOCK_IN_too_far(days={days_left})"
 
-        has_zone = factors.get("price_zone", 0) >= LOCK_IN_MIN_SCORE
-
-        # VOLUME SURGE OVERRIDE: 3x+ normal volume on a LOCK_IN market = auto-enter.
-        # Insider/early-info signal — someone is loading up before news goes public.
-        # Enter now, before the price moves. Same edge as ZachXBT-style insider plays.
+        has_zone  = factors.get("price_zone", 0) >= lock_min
         vol_score = factors.get("volume_spike", 0)
+
         if vol_score >= VOLUME_SURGE_AUTO_ENTRY:
-            return True, f"VOLUME_SURGE(vol={vol_score:.0f}) — insider signal detected"
+            return True, f"VOLUME_SURGE(vol={vol_score:.0f}) — insider signal"
 
         if has_zone and count >= 1:
-            return True, f"LOCK_IN(zone={factors['price_zone']:.0f}+{stack})"
+            return True, f"LOCK_IN(zone={factors['price_zone']:.0f}+{stack},min={lock_min:.0f})"
         if has_zone:
-            return True, f"LOCK_IN(zone_only={factors['price_zone']:.0f})"
-        return False, "LOCK_IN_zone_weak"
+            return True, f"LOCK_IN(zone_only={factors['price_zone']:.0f},min={lock_min:.0f})"
+        return False, f"LOCK_IN_zone_weak({factors.get('price_zone',0):.0f}<{lock_min:.0f})"
 
-    # MOMENTUM: BLOCKED in high-accuracy mode
-    # 55-65% WR pulls overall win rate below 80% target
-    return False, "MOMENTUM_disabled_high_accuracy_mode"
+    # MOMENTUM: disabled by default, learner can re-enable if WR data supports it
+    if market_type == "MOMENTUM":
+        if not momentum_on:
+            return False, "MOMENTUM_disabled(learner_off)"
+        active = _get_active_signals(factors)
+        if len(active) >= 2:
+            return True, f"MOMENTUM(signals={'+'.join(active)})"
+        return False, "MOMENTUM_insufficient_signals"
+
+    return False, "unknown_market_type"
 
 
 # ── Main scorer ───────────────────────────────────────────────────────────────
@@ -471,6 +486,23 @@ async def score_market(market: dict) -> Optional[dict]:
         weights = await db.get_signal_weights()
     except Exception:
         weights = {}
+
+    # ── Load dynamic thresholds from self-improvement engine ──────────────────
+    # These replace the hardcoded constants and get adjusted automatically
+    # based on real win rate performance toward the 80% target.
+    try:
+        dynamic = await sie.get_current_thresholds()
+    except Exception:
+        dynamic = {}
+
+    # Use dynamic thresholds if available, fall back to module-level constants
+    _copy_trade_min   = dynamic.get("COPY_TRADE_threshold",   COPY_TRADE_WALLET_MIN)
+    _lock_in_min      = dynamic.get("LOCK_IN_threshold",      LOCK_IN_MIN_SCORE)
+    _bne_min          = dynamic.get("BUY_NO_EARLY_threshold",  BUY_NO_EARLY_MIN_SCORE)
+    _copy_enabled     = dynamic.get("COPY_TRADE_enabled",     True)
+    _lock_enabled     = dynamic.get("LOCK_IN_enabled",        True)
+    _bne_enabled      = dynamic.get("BUY_NO_EARLY_enabled",   True)
+    _momentum_enabled = dynamic.get("MOMENTUM_enabled",       False)
 
     w_vol   = weights.get("volume_spike",  3.5)  # ↑ 1.0→3.5: insider signal — highest weight
     w_zone  = weights.get("price_zone",    1.0)
@@ -525,7 +557,16 @@ async def score_market(market: dict) -> Optional[dict]:
         "days_left":    _days_left,   # used by LOCK_IN entry filter
     }
 
-    can_enter, entry_reason = _qualifies_for_entry(factors, market_type)
+    can_enter, entry_reason = _qualifies_for_entry(
+        factors, market_type,
+        copy_min   = _copy_trade_min,
+        lock_min   = _lock_in_min,
+        bne_min    = _bne_min,
+        copy_on    = _copy_enabled,
+        lock_on    = _lock_enabled,
+        bne_on     = _bne_enabled,
+        momentum_on= _momentum_enabled,
+    )
     active_signals          = _get_active_signals(factors)
 
     total_w = w_vol + w_zone + w_liq + w_mom + w_cat + w_news + w_wall + w_date + w_bne
