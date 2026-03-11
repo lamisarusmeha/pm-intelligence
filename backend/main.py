@@ -339,14 +339,34 @@ async def llm_analysis_cycle(markets: list, markets_by_id: dict):
     candidates = spike_markets[:4]  # Up to 4 spike markets
     remaining_slots = LLM_TOP_MARKETS - len(candidates)
 
-    # Add high-volume non-spike markets
+    # Add high-volume non-spike markets, PREFER SHORT-DURATION (resolve <48h)
+    # Short-duration = faster learning loop (trade closes sooner = lesson sooner)
     seen = {m["id"] for m in candidates}
+    short_duration = []
+    other_markets = []
     for m in markets[:50]:
+        if m["id"] in seen or m.get("volume24hr", 0) <= 10000:
+            continue
+        end_str = m.get("end_date", "")
+        try:
+            from datetime import datetime as _dt
+            end_str = end_str.replace("Z", "+00:00")
+            end_dt = _dt.fromisoformat(end_str).replace(tzinfo=None) if "T" in end_str else _dt.strptime(end_str[:10], "%Y-%m-%d")
+            days_left = max(0, (end_dt - _dt.utcnow()).total_seconds() / 86400)
+        except Exception:
+            days_left = 9999
+        if days_left <= 2:
+            short_duration.append(m)
+        elif days_left <= 7:
+            other_markets.insert(0, m)  # 1-7 day markets next
+        else:
+            other_markets.append(m)
+    # Fill: short-duration first, then others
+    for m in short_duration + other_markets:
         if len(candidates) >= LLM_TOP_MARKETS:
             break
-        if m["id"] not in seen and m.get("volume24hr", 0) > 10000:
-            candidates.append(m)
-            seen.add(m["id"])
+        candidates.append(m)
+        seen.add(m["id"])
 
     _llm_debug["candidates_found"] = len(candidates)
 
