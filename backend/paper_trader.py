@@ -45,7 +45,7 @@ def _lock_in_exit_params(market: Optional[dict]) -> Tuple[float, float, float]:
 # ââ Strategy Exit Constants ââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Strategy 1: NEAR_CERTAINTY â hold to resolution
-NEAR_CERTAINTY_HOLD_HOURS = 720.0
+NEAR_CERTAINTY_HOLD_HOURS = 48.0
 
 # Strategy 2: VOLUME_SPIKE
 VOLUME_SPIKE_TP         = 0.04
@@ -102,8 +102,8 @@ NO_ALLOWED_TYPES = {
     "SHORT_DURATION",
 }
 
-MAX_POS_NEAR_CERT_HIGH  = 500
-MAX_POS_NEAR_CERT_MED   = 200
+MAX_POS_NEAR_CERT_HIGH  = 150
+MAX_POS_NEAR_CERT_MED   = 100
 MAX_POS_BINANCE_ARB     = 75
 MAX_POS_SHORT_DURATION  = 100
 MAX_POS_DEFAULT         = 150
@@ -205,7 +205,7 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
         return None
 
     # SANITY CHECK: Block extreme prices
-    max_price = 0.97 if market_type == "NEAR_CERTAINTY" else 0.95
+    max_price = 0.93 if market_type == "NEAR_CERTAINTY" else 0.95
     if entry_price > max_price or entry_price < 0.05:
         print(f"[GATE] EXTREME price {entry_price:.4f} â skip '{signal['market_question'][:40]}'")
         return None
@@ -494,16 +494,28 @@ async def check_exits(markets_by_id: dict):
 
         # For NEAR_CERTAINTY, SHORT_DURATION, and BINANCE_ARB: close on resolution
         if market_type in ("NEAR_CERTAINTY", "SHORT_DURATION", "BINANCE_ARB"):
+            # Take profit: resolved in our favor
             if direction == "YES" and yes_price >= 0.97:
                 await _close_at_price(trade, cur_price, "TAKE_PROFIT")
-            elif direction == "NO" and yes_price <= 0.03:
+                continue
+            if direction == "NO" and yes_price <= 0.03:
                 await _close_at_price(trade, cur_price, "TAKE_PROFIT")
-            # Also close if clearly losing
-            elif direction == "YES" and yes_price <= 0.05:
+                continue
+            # Stop loss: resolved against us
+            if direction == "YES" and yes_price <= 0.05:
                 await _close_at_price(trade, cur_price, "STOP_LOSS")
-            elif direction == "NO" and yes_price >= 0.95 and entry_px < 0.90:
-                # Only stop-loss NO trades if they're clearly losing
-                pass
+                continue
+            if direction == "NO" and yes_price >= 0.95:
+                await _close_at_price(trade, cur_price, "STOP_LOSS")
+                continue
+            # PERCENTAGE STOP-LOSS: cut losses at 20% (the key fix)
+            # Without this, a $150 trade at 0.80 can lose $150 on resolution.
+            # With this, max loss is ~$30 (20% of $150).
+            if entry_px > 0:
+                loss_pct = (cur_price - entry_px) / entry_px
+                if loss_pct <= -0.20:
+                    await _close_at_price(trade, cur_price, "STOP_LOSS")
+                    continue
             continue
 
         # Standard TP/SL for other types
