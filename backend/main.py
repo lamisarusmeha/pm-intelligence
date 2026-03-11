@@ -774,7 +774,7 @@ async def api_llm_test():
         import anthropic as _anth
         client = _anth.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         response = await client.messages.create(
-            model="claude-haiku-4-5-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=50,
             messages=[{"role": "user", "content": "Say hello in exactly 5 words."}],
         )
