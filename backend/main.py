@@ -77,6 +77,16 @@ def _auth_required():
 BASE_DIR     = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 INDEX_HTML   = FRONTEND_DIR / "index.html"
+# Fallback: if frontend not found via __file__, try CWD (Railway CWD=/app)
+if not INDEX_HTML.exists():
+  BASE_DIR     = Path(os.getcwd())
+  FRONTEND_DIR = BASE_DIR / "frontend"
+  INDEX_HTML   = FRONTEND_DIR / "index.html"
+# Fallback 2: hardcoded Railway path
+if not INDEX_HTML.exists():
+  BASE_DIR     = Path("/app")
+  FRONTEND_DIR = BASE_DIR / "frontend"
+  INDEX_HTML   = FRONTEND_DIR / "index.html"
 
 # ââ SPEED CONFIG ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 GAMMA_API    = "https://gamma-api.polymarket.com"
