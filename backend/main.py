@@ -143,7 +143,7 @@ async def close_stuck_trades():
         try:
             created   = datetime.fromisoformat(t["created_at"])
             age_hours = (now - created).total_seconds() / 3600
-            if age_hours > 48 or (t.get("entry_price") or 1) < 0.02:
+            if age_hours > 720 or (t.get("entry_price") or 1) < 0.02:
                 exit_price = max(t.get("entry_price") or 0.01, 0.01)
                 payout     = t["shares"] * exit_price
                 pnl        = round(payout - t["cost"], 2)
@@ -296,6 +296,55 @@ async def fetch_markets() -> list:
 
 # ââ Main Trading Loop â 3 Strategies âââââââââââââââââââââââââââââââââââââââââ
 
+async def fetch_market_by_id(market_id: str) -> Optional[dict]:
+    """Fetch a single market by ID — used to check resolved markets for open trades."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{GAMMA_API}/markets/{market_id}")
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    data = data[0]
+                if isinstance(data, dict):
+                    parsed = _parse_market(data)
+                    if parsed:
+                        return parsed
+                    # Market might be closed — parse manually
+                    outcome_prices = data.get("outcomePrices", [0.5])
+                    if isinstance(outcome_prices, str):
+                        import json as _j
+                        outcome_prices = _j.loads(outcome_prices)
+                    yes_price = float(outcome_prices[0]) if outcome_prices else 0.5
+                    return {
+                        "id": str(data.get("id", market_id)),
+                        "question": data.get("question", ""),
+                        "yes_price": round(yes_price, 4),
+                        "no_price": round(1 - yes_price, 4),
+                        "closed": 1 if data.get("closed", False) else 0,
+                        "active": 1 if data.get("active", True) else 0,
+                        "end_date": data.get("endDate", ""),
+                        "volume": float(data.get("volume", 0) or 0),
+                        "liquidity": float(data.get("liquidity", 0) or 0),
+                    }
+    except Exception as e:
+        print(f"[FETCH] Market {market_id} lookup failed: {e}")
+    return None
+
+
+async def backfill_open_trade_markets(markets_by_id: dict):
+    """Fetch current prices for open trades whose markets aren't in the main fetch."""
+    open_trades = await db.get_open_paper_trades()
+    missing_ids = [t["market_id"] for t in open_trades if t["market_id"] not in markets_by_id]
+    if not missing_ids:
+        return
+    print(f"[v3] Fetching {len(missing_ids)} missing markets for open trades")
+    for mid in missing_ids[:10]:  # Cap at 10 to avoid rate limits
+        m = await fetch_market_by_id(mid)
+        if m:
+            markets_by_id[m["id"]] = m
+            print(f"[v3] Backfilled market {mid}: YES={m['yes_price']:.3f} closed={m.get('closed', 0)}")
+
+
 async def trading_loop():
     global _loop_count
     print("[v3] PM Intelligence v3 â 3-Strategy Trading Agent")
@@ -322,6 +371,9 @@ async def trading_loop():
                     m["volume24hr"], m["liquidity"]
                 )
                 markets_by_id[m["id"]] = m
+
+            # Backfill resolved markets for open trades
+            await backfill_open_trade_markets(markets_by_id)
 
             # Check exits FIRST (before entering new trades)
             await check_exits(markets_by_id)
@@ -423,7 +475,8 @@ async def trading_loop():
                     "trades":             trades,
                     "signals":            recent_sigs,
                     "weights":            weights,
-                    "markets":            markets[:40],
+                    "markets":            markets[:200],
+                    "total_markets":      len(markets),
                     "trade_explanations": explanations,
                     "leverage_portfolio": lev_portfolio,
                     "leverage_trades":    lev_trades,
@@ -508,7 +561,7 @@ async def websocket_endpoint(ws: WebSocket):
             "trades":             await db.get_all_paper_trades(50),
             "signals":            await db.get_recent_signals(30),
             "weights":            await db.get_signal_weights(),
-            "markets":            await db.get_all_markets(40),
+            "markets":            await db.get_all_markets(200),
             "trade_explanations": await db.get_trade_explanations(30),
             "leverage_portfolio": await db.get_leverage_portfolio(),
             "leverage_trades":    await db.get_all_leverage_trades(30),
