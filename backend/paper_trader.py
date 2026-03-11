@@ -6,10 +6,14 @@ Supports all 4 strategies + legacy modes for backward compatibility.
 import json
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
+import traceback
 
 import database as db
 from trade_explainer import explain_entry, explain_exit, generate_lesson
 import self_improvement_engine as sie
+
+# Learning error tracking (max 20, FIFO) â exposed via /api/llm/debug
+_learning_errors = []
 
 
 def _market_days_left(market: Optional[dict]) -> float:
@@ -48,10 +52,8 @@ VOLUME_SPIKE_TP         = 0.04
 VOLUME_SPIKE_SL         = 0.03
 VOLUME_SPIKE_HOLD_HOURS = 2.0
 
-# Strategy 3: BINANCE_ARB
-BINANCE_ARB_TP         = 0.05
-BINANCE_ARB_SL         = 0.04
-BINANCE_ARB_HOLD_HOURS = 0.5
+# Strategy 3: BINANCE_ARB â hold to resolution (5-min binary markets)
+BINANCE_ARB_HOLD_HOURS = 0.15
 
 # Strategy 4: SHORT_DURATION â hold to resolution (5-15 min markets)
 SHORT_DURATION_HOLD_HOURS = 0.5  # 30 min max â these resolve in 5-15 min
@@ -100,6 +102,30 @@ NO_ALLOWED_TYPES = {
     "SHORT_DURATION",
 }
 
+MAX_POS_NEAR_CERT_HIGH  = 500
+MAX_POS_NEAR_CERT_MED   = 200
+MAX_POS_BINANCE_ARB     = 75
+MAX_POS_SHORT_DURATION  = 100
+MAX_POS_DEFAULT         = 150
+
+
+# ââ Position Cap âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
+def _get_position_cap(signal: dict) -> float:
+    market_type = signal.get("market_type", "")
+    direction = signal.get("direction", "YES")
+    yes_price = signal.get("yes_price", 0.5)
+    entry_price = yes_price if direction == "YES" else (1 - yes_price)
+    if market_type == "BINANCE_ARB":
+        return MAX_POS_BINANCE_ARB
+    if market_type == "SHORT_DURATION":
+        return MAX_POS_SHORT_DURATION
+    if market_type == "NEAR_CERTAINTY":
+        if entry_price >= 0.90:
+            return MAX_POS_NEAR_CERT_HIGH
+        return MAX_POS_NEAR_CERT_MED
+    return MAX_POS_DEFAULT
+
 
 # ââ Kelly Criterion ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
@@ -131,12 +157,16 @@ def _kelly_position_size(portfolio: dict, signal: dict) -> float:
 
     bet = cash * kelly_frac
 
+    cap = _get_position_cap(signal)
+
     # SHORT_DURATION: smaller position sizes since these resolve fast
     if market_type == "SHORT_DURATION":
-        return round(max(cash * 0.001, min(cash * 0.003, bet)), 2)
+        bet = max(cash * 0.001, min(cash * 0.003, bet))
+        return round(min(bet, cap), 2)
 
     # Standard: 0.2%-0.5% per trade
-    return round(max(cash * 0.002, min(cash * 0.005, bet)), 2)
+    bet = max(cash * 0.002, min(cash * 0.005, bet))
+    return round(min(bet, cap), 2)
 
 
 # ââ Entry âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
@@ -250,10 +280,19 @@ async def _close_at_price(trade: dict, exit_price: float, reason: str):
         pass
 
     # ââ SELF-LEARNING: Record EVERY trade result âââââââââââââââââââââââââ
+    # Split into two blocks so factor extraction failure doesn't prevent recording
+    factors = {}
     try:
         factors = _extract_factors(trade_id, await db.get_trade_explanations(200))
+    except Exception as e:
+        err = {"ts": datetime.utcnow().isoformat(), "stage": "factor_extraction",
+               "trade_id": trade_id, "error": str(e), "tb": traceback.format_exc()}
+        _learning_errors.append(err)
+        if len(_learning_errors) > 20:
+            _learning_errors.pop(0)
+        print(f"[SELF-IMPROVE] Factor extraction failed: {e}")
 
-        # Record in self-improvement engine (triggers retrain every N trades)
+    try:
         await sie.record_trade_result(
             trade_id       = trade_id,
             market_type    = trade.get("market_type", "UNKNOWN"),
@@ -265,6 +304,11 @@ async def _close_at_price(trade: dict, exit_price: float, reason: str):
             signal_factors = factors,
         )
     except Exception as e:
+        err = {"ts": datetime.utcnow().isoformat(), "stage": "record_trade_result",
+               "trade_id": trade_id, "error": str(e), "tb": traceback.format_exc()}
+        _learning_errors.append(err)
+        if len(_learning_errors) > 20:
+            _learning_errors.pop(0)
         print(f"[SELF-IMPROVE] Record failed: {e}")
 
     # ââ TRADE EXPLANATION & LESSON EXTRACTION ââââââââââââââââââââââââââââ
@@ -394,8 +438,8 @@ async def check_exits(markets_by_id: dict):
             stop_loss_delta   = VOLUME_SPIKE_SL
             max_hold_hours    = VOLUME_SPIKE_HOLD_HOURS
         elif market_type == "BINANCE_ARB":
-            take_profit_delta = BINANCE_ARB_TP
-            stop_loss_delta   = BINANCE_ARB_SL
+            take_profit_delta = None
+            stop_loss_delta   = None
             max_hold_hours    = BINANCE_ARB_HOLD_HOURS
         elif market_type == "LLM_ANALYSIS":
             take_profit_delta = LLM_ANALYSIS_TP
@@ -448,8 +492,8 @@ async def check_exits(markets_by_id: dict):
             await _close_at_price(trade, cur_price, "STOP_LOSS")
             continue
 
-        # For NEAR_CERTAINTY and SHORT_DURATION: close on resolution
-        if market_type in ("NEAR_CERTAINTY", "SHORT_DURATION"):
+        # For NEAR_CERTAINTY, SHORT_DURATION, and BINANCE_ARB: close on resolution
+        if market_type in ("NEAR_CERTAINTY", "SHORT_DURATION", "BINANCE_ARB"):
             if direction == "YES" and yes_price >= 0.97:
                 await _close_at_price(trade, cur_price, "TAKE_PROFIT")
             elif direction == "NO" and yes_price <= 0.03:
