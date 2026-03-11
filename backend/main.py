@@ -37,7 +37,7 @@ import news_engine
 import wallet_tracker
 
 # v2 modules â LLM brain
-from llm_agent import analyze_market, evaluate_trade_outcome, get_cost_summary
+from llm_agent import analyze_market, evaluate_trade_outcome, get_cost_summary, HAS_ANTHROPIC, ANTHROPIC_API_KEY
 from volume_detector import detect_spike, get_market_volume_profile, _ensure_tables as init_volume_tables
 from memory_system import (
     init_memory, store_trade_reasoning, record_trade_outcome,
@@ -363,7 +363,13 @@ async def llm_analysis_cycle(markets: list, markets_by_id: dict):
             )
 
             if not decision:
+                _llm_debug["last_error"] = f"analyze_market returned None for {market.get('question','?')[:50]}"
                 continue
+
+            # Track which model was used
+            model_used = decision.get("model", "unknown")
+            if "fallback" in model_used:
+                _llm_debug["last_error"] = f"Using FALLBACK (HAS_ANTHROPIC={HAS_ANTHROPIC}, KEY={'SET' if ANTHROPIC_API_KEY else 'EMPTY'})"
 
             action = decision["action"]
             confidence = decision["confidence"]
@@ -768,7 +774,9 @@ async def api_llm_debug():
         "llm_every": LLM_EVERY,
         "next_llm_at": LLM_EVERY - (_loop_count % LLM_EVERY),
         "debug": _llm_debug,
-        "has_anthropic": "check_llm_agent",
+        "has_anthropic": HAS_ANTHROPIC,
+        "has_api_key": bool(ANTHROPIC_API_KEY),
+        "api_key_preview": ANTHROPIC_API_KEY[:8] + "..." if ANTHROPIC_API_KEY else "NOT SET",
         "costs": get_cost_summary(),
     }
 
