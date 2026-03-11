@@ -208,6 +208,13 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
     if entry_price <= 0:
         return None
 
+    # SANITY CHECK: Block extreme prices — no room for TP/SL profit
+    # Buying at >95¢ means max gain <5¢ but stop-loss can lose much more
+    # Buying at <5¢ means betting against near-certainty
+    if entry_price > 0.95 or entry_price < 0.05:
+        print(f"[GATE] EXTREME price {entry_price:.4f} — skip '{signal['market_question'][:40]}'")
+        return None
+
     shares      = round(cost / entry_price, 4)
     signal_id   = await db.save_signal(signal)
     now         = datetime.utcnow().isoformat()
