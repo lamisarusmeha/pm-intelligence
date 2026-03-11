@@ -419,6 +419,11 @@ async def llm_analysis_cycle(markets: list, markets_by_id: dict):
             yes_price = market.get("yes_price", 0.5)
             entry_price = yes_price if direction == "YES" else (1 - yes_price)
 
+            # SANITY CHECK: Reject extreme prices before entering trade
+            if entry_price > 0.95 or entry_price < 0.05:
+                print(f"[LLM] ⚠  EXTREME PRICE {entry_price:.4f} — skip '{market['question'][:40]}'")
+                continue
+
             signal = {
                 "market_id":       market["id"],
                 "market_question": market["question"],
