@@ -154,7 +154,7 @@ def _kelly_position_size(portfolio: dict, signal: dict) -> float:
     # Clamp: minimum 0.5%, maximum 0.5% per trade (hard $500 cap on $100k)
     # Hard cap prevents one bad stop-loss from wiping a large chunk of capital.
     # The $617 BUY_NO_EARLY loss showed Kelly can oversize dangerously — cap it.
-    return round(max(cash * 0.005, min(cash * 0.005, bet)), 2)
+    return round(max(cash * 0.001, min(cash * 0.002, bet)), 2)
 
 
 # ── Entry ─────────────────────────────────────────────────────────────────────
@@ -196,7 +196,7 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
 
     # Block raw NO on MOMENTUM/LOCK_IN/COPY_TRADE — only 50% WR historically.
     # BUY_NO_EARLY is EXEMPT: its NO bet has documented 78% NO base rate edge.
-    if direction == "NO" and market_type != "BUY_NO_EARLY":
+    if direction == "NO" and market_type not in ("BUY_NO_EARLY", "LOCK_IN"):
         return None
 
     # Hard block EXTREME mode — no TP room (price already at 92%+)
