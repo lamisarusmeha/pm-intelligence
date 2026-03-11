@@ -248,7 +248,7 @@ def _build_analysis_prompt(
 1. Estimate the TRUE probability of YES based on all evidence
 2. Compare to the market price to identify mispricing
 3. Decide: BUY_YES, BUY_NO, or SKIP
-4. Only recommend BUY if you see >10% edge AND confidence >= 0.6
+4. Only recommend BUY if you see >5% edge AND confidence >= 0.4 (we are in learning phase — explore more markets)
 
 Respond with ONLY this JSON (no other text):
 {{
@@ -320,9 +320,8 @@ async def evaluate_trade_outcome(
             return f"Lost ${abs(pnl):.2f} on {trade.get('market_question', 'unknown')}. No LLM analysis available."
         return None
 
-    # Only spend money on lesson extraction for losses or big wins
-    if outcome == "WIN" and abs(pnl) < 50:
-        return f"Won ${pnl:.2f} on {trade.get('market_question', 'unknown')}. Strategy worked as expected."
+    # LEARNING MODE: Extract lessons from ALL trades for maximum data
+    # (Previously skipped small wins — but every data point matters during learning phase)
 
     prompt = f"""A trade just closed. Analyze what happened and extract a lesson.
 
@@ -480,8 +479,8 @@ async def _call_llm(
     cost_key = "haiku" if is_haiku else "sonnet"
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        response = await client.messages.create(
             model=model,
             max_tokens=max_tokens,
             temperature=0.2,
@@ -706,8 +705,8 @@ Be specific â mention the market type, category, or signal type.
 Return ONLY the lesson text, nothing else."""
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        response = await client.messages.create(
             model=SCREENING_MODEL,  # Use Haiku for lessons (cheapest)
             max_tokens=150,
             temperature=0.3,
