@@ -74,7 +74,7 @@ def _auth_required():
         headers={"WWW-Authenticate": 'Basic realm="PM Intelligence"'},
     )
 
-BASE_DIR     = Path(__file__).parent.parent
+BASE_DIR     = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 INDEX_HTML   = FRONTEND_DIR / "index.html"
 
@@ -862,7 +862,7 @@ async def serve_index(request: Request):
         return FileResponse(INDEX_HTML, headers={
             "Cache-Control": "no-store, no-cache, must-revalidate"
         })
-    return JSONResponse({"error": "Frontend not found"}, status_code=404)
+    return JSONResponse({"error": "Frontend not found", "base_dir": str(BASE_DIR), "frontend_dir": str(FRONTEND_DIR), "index_html": str(INDEX_HTML), "index_exists": INDEX_HTML.exists(), "frontend_exists": FRONTEND_DIR.exists(), "cwd": os.getcwd(), "file": str(Path(__file__).resolve())}, status_code=404)
 
 @app.get("/{path:path}")
 async def serve_static(path: str, request: Request):
