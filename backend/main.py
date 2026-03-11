@@ -410,7 +410,7 @@ async def llm_analysis_cycle(markets: list, markets_by_id: dict):
                 print(f"[LLM] â­ SKIP '{market['question'][:45]}' â {reasoning[:80]}")
                 continue
 
-            if confidence < 0.6 or abs(edge) < 0.10:
+            if confidence < 0.3 or abs(edge) < 0.05:  # Lowered for turbo learning (was 0.6/0.10)
                 print(f"[LLM] â  LOW-CONF '{market['question'][:40]}' conf={confidence:.2f} edge={edge:.1%}")
                 continue
 
