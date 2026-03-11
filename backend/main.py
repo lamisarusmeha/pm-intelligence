@@ -28,6 +28,7 @@ import database as db
 from paper_trader import (
     maybe_enter_trade, check_exits,
     check_leverage_exits,
+    _learning_errors,
 )
 from near_certainty_grinder import generate_near_certainty_signals
 from volume_spike_trader import generate_spike_signals
@@ -41,6 +42,7 @@ from binance_feed import (
 import telegram_alerts
 import volume_detector
 import memory_system
+import self_improvement_engine as sie
 
 try:
     from llm_agent import analyze_market, get_cost_summary, evaluate_trade_outcome
@@ -111,6 +113,43 @@ async def lifespan(app):
     await db.init_db()
     await memory_system.init_memory()
 
+    # ââ Memory system startup diagnostic ââââââââââââââââââââââââââââââââââ
+    try:
+        import aiosqlite
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            tables = await conn.execute_fetchall(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+            table_names = [t[0] for t in tables]
+            print(f"[STARTUP] SQLite tables: {table_names}")
+
+            if "signal_performance" in table_names:
+                count = await conn.execute_fetchall("SELECT COUNT(*) FROM signal_performance")
+                print(f"[STARTUP] signal_performance rows: {count[0][0]}")
+            else:
+                print("[STARTUP] WARNING: signal_performance table missing!")
+
+        # Test self_improvement_engine.record_trade_result() with dummy data
+        await sie.record_trade_result(
+            trade_id=-1, market_type="TEST", direction="YES",
+            entry_price=0.5, exit_price=0.6, pnl=0.1, won=True,
+            signal_factors={},
+        )
+        # Clean up test record
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("DELETE FROM signal_performance WHERE trade_id = -1")
+            await conn.commit()
+        print("[STARTUP] Memory system diagnostic: PASS")
+    except Exception as e:
+        err_msg = f"[STARTUP] Memory system diagnostic FAILED: {e}"
+        print(err_msg)
+        import traceback
+        _learning_errors.append({
+            "error": err_msg,
+            "traceback": traceback.format_exc(),
+            "time": datetime.utcnow().isoformat(),
+        })
+
     try:
         await volume_detector._ensure_tables()
     except Exception as e:
@@ -124,6 +163,18 @@ async def lifespan(app):
 
     # Ensure strategy_params and signal_performance tables exist
     await _ensure_self_learning_tables()
+
+    # Populate arb entered markets from open BINANCE_ARB trades (prevents double-entry after redeploy)
+    try:
+        from binance_arb import _arb_entered_markets
+        open_trades = await db.get_open_paper_trades()
+        for trade in open_trades:
+            if trade.get("market_type") == "BINANCE_ARB":
+                _arb_entered_markets.add(trade["market_id"])
+        if _arb_entered_markets:
+            print(f"[STARTUP] Populated {len(_arb_entered_markets)} BINANCE_ARB entered markets from DB")
+    except Exception as e:
+        print(f"[STARTUP] Arb market population: {e}")
 
     # Launch background tasks
     asyncio.create_task(binance_websocket_loop())
@@ -529,7 +580,7 @@ async def llm_analysis_cycle(markets: list) -> list:
     return signals
 
 
-# ââ Trading Loop ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ââ Trading Loop ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 async def trading_loop():
     global _loop_count
@@ -620,6 +671,13 @@ async def trading_loop():
                 if trade:
                     entered += 1
                     telegram_alerts.alert_trade_entry(trade)
+                    # Track BINANCE_ARB entries to prevent double-entry
+                    if sig.get("market_type") == "BINANCE_ARB":
+                        try:
+                            from binance_arb import _arb_entered_markets
+                            _arb_entered_markets.add(sig["market_id"])
+                        except ImportError:
+                            pass
 
             _strategy_debug["total_entered"] += entered
 
@@ -852,6 +910,7 @@ async def api_llm_debug():
         "strategy_debug": _strategy_debug,
         "binance": get_binance_status(),
         "last_error": None,
+        "learning_errors": _learning_errors,
     }
 
 
@@ -869,6 +928,25 @@ async def api_llm_categories():
         return await memory_system.get_category_performance()
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/api/trades/explained")
+async def api_trades_explained():
+    """Return trades enriched with entry reasons and signal factors."""
+    trades = await db.get_all_paper_trades(200)
+    signals = await db.get_recent_signals(200)
+    signal_map = {s["id"]: s for s in signals}
+
+    explained = []
+    for trade in trades:
+        signal = signal_map.get(trade.get("signal_id"))
+        explained.append({
+            **trade,
+            "entry_reason": signal.get("entry_reason", "Unknown") if signal else "Unknown",
+            "factors_json": signal.get("factors_json") if signal else None,
+            "score": signal.get("score") if signal else None,
+        })
+    return explained
 
 
 @app.get("/api/leverage/portfolio")
