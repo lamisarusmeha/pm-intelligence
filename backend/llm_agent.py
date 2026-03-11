@@ -26,7 +26,7 @@ except ImportError:
     HAS_ANTHROPIC = False
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-SCREENING_MODEL = os.getenv("LLM_SCREEN_MODEL", "claude-haiku-4-5-20241022")
+SCREENING_MODEL = os.getenv("LLM_SCREEN_MODEL", "claude-haiku-4-5-20251001")
 DEEP_MODEL = os.getenv("LLM_DEEP_MODEL", "claude-sonnet-4-20250514")
 
 # Edge threshold for upgrading to Sonnet analysis
@@ -388,7 +388,7 @@ except ImportError:
     HAS_ANTHROPIC = False
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-SCREENING_MODEL = os.getenv("LLM_SCREEN_MODEL", "claude-haiku-4-5-20241022")
+SCREENING_MODEL = os.getenv("LLM_SCREEN_MODEL", "claude-haiku-4-5-20251001")
 DEEP_MODEL = os.getenv("LLM_DEEP_MODEL", "claude-sonnet-4-20250514")
 
 # Edge threshold for upgrading to Sonnet analysis
