@@ -767,6 +767,32 @@ async def api_stats():
 async def api_llm_costs():
     return get_cost_summary()
 
+@app.get("/api/llm/test")
+async def api_llm_test():
+    """Direct LLM test — calls Haiku with a simple prompt to verify API works."""
+    try:
+        import anthropic as _anth
+        client = _anth.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20241022",
+            max_tokens=50,
+            messages=[{"role": "user", "content": "Say hello in exactly 5 words."}],
+        )
+        return {
+            "success": True,
+            "response": response.content[0].text,
+            "model": response.model,
+            "sdk_version": _anth.__version__,
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()[-500:],
+        }
+
 @app.get("/api/llm/debug")
 async def api_llm_debug():
     return {
