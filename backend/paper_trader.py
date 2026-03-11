@@ -196,7 +196,7 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
 
     # Block raw NO on MOMENTUM/LOCK_IN/COPY_TRADE — only 50% WR historically.
     # BUY_NO_EARLY is EXEMPT: its NO bet has documented 78% NO base rate edge.
-    if direction == "NO" and market_type not in ("BUY_NO_EARLY", "LOCK_IN"):
+    if direction == "NO" and market_type not in ("BUY_NO_EARLY", "LOCK_IN", "LLM_ANALYSIS"):
         return None
 
     # Hard block EXTREME mode — no TP room (price already at 92%+)
