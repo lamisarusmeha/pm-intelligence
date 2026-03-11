@@ -100,12 +100,12 @@ function update(d) {
     $('pnl').className = 'big-num ' + (pnl >= 0 ? 'green' : 'red');
     $('winLoss').textContent = (d.portfolio.win_count||0) + ' W / ' + (d.portfolio.loss_count||0) + ' L';
   }
-  // Active trades
-  if (d.active_trades != null) {
-    const trades = d.active_trades || [];
-    $('activeTrades').textContent = trades.length;
+  // Active trades (from 'trades' key in broadcast)
+  if (d.trades) {
+    const open = d.trades.filter(t => t.status === 'OPEN');
+    $('activeTrades').textContent = open.length;
     let inv = 0;
-    trades.forEach(t => inv += (t.amount || 0));
+    open.forEach(t => inv += (t.cost || t.amount || 0));
     $('invested').textContent = '$' + fmt(inv) + ' invested';
   }
   // LLM costs
@@ -126,14 +126,17 @@ function update(d) {
   if (d.memory_stats) {
     $('lessonsCount').textContent = d.memory_stats.total_lessons || 0;
   }
-  // Recent trades list
-  if (d.recent_trades && d.recent_trades.length > 0) {
-    $('tradeList').innerHTML = d.recent_trades.slice(0, 20).map(t => {
+  // Recent trades list (backend sends 'trades')
+  if (d.trades && d.trades.length > 0) {
+    $('tradeList').innerHTML = d.trades.slice(0, 20).map(t => {
       const llm = t.llm_reasoning ? '<span class="llm-tag">LLM</span>' : '';
+      const side = t.direction || t.side || 'YES';
+      const status = t.status === 'OPEN' ? '<span style="color:#22c55e;font-size:10px;margin-left:6px">OPEN</span>' :
+                     t.status === 'CLOSED' ? '<span style="color:#64748b;font-size:10px;margin-left:6px">CLOSED</span>' : '';
       return '<div class="trade-item">' +
-        '<div class="trade-q">' + (t.question||t.market_question||'Unknown') + llm + '</div>' +
-        '<div class="trade-side ' + (t.side||'YES') + '">' + (t.side||'YES') + ' @ ' + fmt(t.price||t.entry_price, 2) + '</div>' +
-        '<div class="trade-conf">' + fmt((t.confidence||0)*100, 0) + '% conf</div>' +
+        '<div class="trade-q">' + (t.market_question||t.question||'Unknown') + llm + status + '</div>' +
+        '<div class="trade-side ' + side + '">' + side + ' @ ' + fmt(t.entry_price||t.price, 2) + '</div>' +
+        '<div class="trade-conf">$' + fmt(t.cost||0, 0) + '</div>' +
         '</div>';
     }).join('');
   }
