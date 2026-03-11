@@ -467,11 +467,23 @@ async def llm_analysis_cycle(markets: list) -> list:
 
     signals = []
 
-    # Select candidates: prefer short-duration, then near-resolution
-    candidates = sorted(
-        markets,
-        key=lambda m: (_days_left(m.get("end_date", "")), -m.get("volume24hr", 0)),
-    )[:15]  # Screen top 15 candidates
+    # Select candidates: prioritize MID-RANGE markets (0.20-0.80) where LLM can find real edges.
+    # Near-certainty markets (>0.80) have no edge â the price already reflects reality.
+    mid_range = [
+        m for m in markets
+        if 0.15 <= m.get("yes_price", 0.5) <= 0.85
+        and m.get("volume24hr", 0) > 100
+        and m.get("liquidity", 0) > 500
+    ]
+    mid_range.sort(key=lambda m: (-m.get("volume24hr", 0), _days_left(m.get("end_date", ""))))
+    candidates = mid_range[:15]
+
+    # If not enough mid-range, add some high-volume markets regardless of price
+    if len(candidates) < 8:
+        seen_ids = {m["id"] for m in candidates}
+        extras = [m for m in markets if m["id"] not in seen_ids and m.get("volume24hr", 0) > 1000]
+        extras.sort(key=lambda m: -m.get("volume24hr", 0))
+        candidates.extend(extras[:15 - len(candidates)])
 
     portfolio = await db.get_portfolio()
     lessons = []
@@ -580,7 +592,7 @@ async def llm_analysis_cycle(markets: list) -> list:
     return signals
 
 
-# ââ Trading Loop ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ââ Trading Loop ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 async def trading_loop():
     global _loop_count
