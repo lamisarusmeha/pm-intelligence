@@ -451,7 +451,16 @@ async def check_exits(markets_by_id: dict):
             await _close_at_price(trade, cur_price, "TIMEOUT")
             continue
 
+        # If market is closed/resolved, close the trade at final price
+        if market and market.get("closed"):
+            await _close_at_price(trade, cur_price, "TAKE_PROFIT" if cur_price > entry_px else "STOP_LOSS")
+            continue
+
         if yes_price is None:
+            # Market not in API at all — check age. If old, force close at entry price.
+            age_hours = (now - created).total_seconds() / 3600
+            if age_hours > 4:  # If market disappeared for 4+ hours, it probably resolved
+                await _close_at_price(trade, entry_px, "TIMEOUT")
             continue
 
         # Early resolution guard â YES trade on a market going to 0
