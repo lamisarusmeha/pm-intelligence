@@ -29,13 +29,13 @@ except ImportError:
 # ââ Configuration ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Markets must have YES or NO price >= this to qualify
-MIN_CONFIDENCE_PRICE = 0.75
+MIN_CONFIDENCE_PRICE = 0.70
 
 # Maximum entry price (don't buy at 0.99 â no upside)
-MAX_ENTRY_PRICE = 0.95
+MAX_ENTRY_PRICE = 0.93
 
 # Minimum liquidity to enter
-MIN_LIQUIDITY = 500
+MIN_LIQUIDITY = 100
 
 # How close to expiry (in seconds) before we consider entering
 # For 5m markets: enter in last 120s; for 15m: enter in last 300s
@@ -57,8 +57,12 @@ SHORT_DURATION_PATTERNS = [
 ]
 
 # Also match by question text patterns
+# Covers formats like:
+#   "Bitcoin Up or Down - March 11, 1PM ET" (hourly)
+#   "Bitcoin Up or Down - March 11, 1:10PM-1:15PM ET" (5-min range)
+#   "Bitcoin Up or Down - March 11, 10:45AM-11:00AM ET" (15-min range)
 QUESTION_PATTERNS = [
-    (re.compile(r"bitcoin\s+up\s+or\s+down.*?(\d+):(\d+)\s*(am|pm)", re.IGNORECASE), "BTC"),
+    (re.compile(r"bitcoin\s+up\s+or\s+down", re.IGNORECASE), "BTC"),
     (re.compile(r"btc\s+up\s+or\s+down", re.IGNORECASE), "BTC"),
     (re.compile(r"ethereum\s+up\s+or\s+down", re.IGNORECASE), "ETH"),
     (re.compile(r"eth\s+up\s+or\s+down", re.IGNORECASE), "ETH"),
@@ -94,7 +98,46 @@ def _parse_short_duration_market(market: dict) -> Optional[dict]:
     # Try question-based detection
     for pattern, asset in QUESTION_PATTERNS:
         if pattern.search(question):
-            # Determine timeframe from end_date proximity
+            # First, try to infer timeframe from question text
+            # "1:10PM-1:15PM" = 5min, "10:45AM-11:00AM" = 15min, "1PM ET" = hourly
+            time_range_match = re.search(
+                r"(\d{1,2}):?(\d{2})?\s*(am|pm)\s*-\s*(\d{1,2}):?(\d{2})?\s*(am|pm)",
+                question, re.IGNORECASE
+            )
+            hourly_match = re.search(
+                r"(\d{1,2})\s*(am|pm)\s+et",
+                question, re.IGNORECASE
+            )
+
+            # Determine timeframe
+            tf = None
+            if time_range_match:
+                # It's a range like "1:10PM-1:15PM" â calculate span
+                h1 = int(time_range_match.group(1))
+                m1 = int(time_range_match.group(2) or 0)
+                ap1 = time_range_match.group(3).upper()
+                h2 = int(time_range_match.group(4))
+                m2 = int(time_range_match.group(5) or 0)
+                ap2 = time_range_match.group(6).upper()
+                if ap1 == "PM" and h1 != 12: h1 += 12
+                if ap1 == "AM" and h1 == 12: h1 = 0
+                if ap2 == "PM" and h2 != 12: h2 += 12
+                if ap2 == "AM" and h2 == 12: h2 = 0
+                span_minutes = (h2 * 60 + m2) - (h1 * 60 + m1)
+                if span_minutes < 0: span_minutes += 24 * 60
+                if span_minutes <= 5:
+                    tf = 5
+                elif span_minutes <= 15:
+                    tf = 15
+                elif span_minutes <= 60:
+                    tf = 60
+            elif hourly_match:
+                tf = 60  # Hourly market
+
+            if tf is None:
+                continue
+
+            # Get resolution time from end_date
             if end_date:
                 try:
                     ed = end_date.replace("Z", "+00:00")
@@ -104,9 +147,8 @@ def _parse_short_duration_market(market: dict) -> Optional[dict]:
                         end_dt = datetime.strptime(ed[:10], "%Y-%m-%d")
                     minutes_left = (end_dt - datetime.utcnow()).total_seconds() / 60
 
-                    # Only match if it resolves within 60 minutes
-                    if minutes_left <= 60:
-                        tf = 5 if minutes_left <= 10 else 15
+                    # Only match if it resolves within 120 minutes (was 60)
+                    if minutes_left <= 120 and minutes_left > -5:
                         return {
                             "asset": asset,
                             "timeframe_minutes": tf,
@@ -133,11 +175,13 @@ def _is_in_entry_window(parsed: dict) -> bool:
     tf = parsed.get("timeframe_minutes", 5)
 
     if tf <= 5:
-        return secs_left <= ENTRY_WINDOW_5M and secs_left > 10  # Don't enter last 10s
+        return secs_left <= ENTRY_WINDOW_5M and secs_left > 10
     elif tf <= 15:
         return secs_left <= ENTRY_WINDOW_15M and secs_left > 15
+    elif tf <= 60:
+        return secs_left <= 1200 and secs_left > 30  # Hourly: last 20 min
     else:
-        return secs_left <= 600 and secs_left > 20  # 60m markets: last 10 min
+        return secs_left <= 1800 and secs_left > 60
 
 
 def _get_binance_direction(asset: str, tf_minutes: int) -> Optional[str]:
