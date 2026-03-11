@@ -1100,6 +1100,7 @@ body::after { content: none; }
       <button class="tab" onclick="switchTab('trades')">📋 Trades</button>
       <button class="tab" onclick="switchTab('weights')">⚖️ Weights</button>
       <button class="tab" onclick="switchTab('insights')">🧠 Insights</button>
+      <button class="tab" onclick="switchTab('strategy')">🎯 Strategy</button>
     </div>
 
     <!-- Markets tab -->
@@ -1135,6 +1136,17 @@ body::after { content: none; }
       </div>
       <div id="insights-list">
         <div class="empty"><div class="empty-icon">🔍</div>Waiting for first trade…</div>
+      </div>
+    </div>
+
+    <!-- Strategy tab -->
+    <div id="tab-strategy" class="right-section" style="flex:1; display:none;">
+      <div class="panel-title" style="margin-bottom:4px;">🎯 Strategy Performance</div>
+      <div style="font-size:11px; color:var(--dim); margin-bottom:14px; font-family:var(--font-text); font-style:italic;">
+        Win rate and P&amp;L breakdown by trading strategy.
+      </div>
+      <div id="strategy-list">
+        <div class="empty"><div class="empty-icon">📊</div>Collecting trade data…</div>
       </div>
     </div>
 
@@ -1233,6 +1245,7 @@ function render() {
   renderTrades();
   renderWeights();
   renderInsights();
+  renderStrategy();
   updatePnlChart();
 }
 
@@ -1539,11 +1552,11 @@ function showToast(signal) {
 ═══════════════════════════════════════════════ */
 function switchTab(tab) {
   activeTab = tab;
-  ['markets','trades','weights','insights'].forEach(t => {
+  ['markets','trades','weights','insights','strategy'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? '' : 'none';
   });
   document.querySelectorAll('.tab').forEach((el, i) => {
-    el.classList.toggle('active', ['markets','trades','weights','insights'][i] === tab);
+    el.classList.toggle('active', ['markets','trades','weights','insights','strategy'][i] === tab);
   });
 }
 
@@ -1657,6 +1670,62 @@ function renderInsights() {
       <div style="margin-top:8px;font-size:9px;color:var(--dim);font-family:var(--font-gothic);letter-spacing:0.5px;">${timeAgo(item.created_at)}</div>
     </div>`;
   }).join('');
+}
+
+/* ═══════════════════════════════════════════════
+   Strategy Performance Tab
+═══════════════════════════════════════════════ */
+function renderStrategy() {
+  const el = document.getElementById('strategy-list');
+  if (!el) return;
+  const trades = state.trades || [];
+  if (!trades.length) { el.textContent = 'Collecting trade data...'; return; }
+  const strategies = {};
+  trades.forEach(t => {
+    const type = t.market_type || 'UNKNOWN';
+    if (!strategies[type]) strategies[type] = {wins:0,losses:0,open:0,pnl:0,count:0};
+    const s = strategies[type]; s.count++;
+    const status = (t.status||'').toUpperCase();
+    if (status === 'OPEN') s.open++;
+    else if ((t.pnl||0) > 0) { s.wins++; s.pnl += (t.pnl||0); }
+    else { s.losses++; s.pnl += (t.pnl||0); }
+  });
+  const LABELS = {'LOCK_IN':'Lock-In','BUY_NO_EARLY':'Buy No Early','VOLUME_SPIKE':'Volume Spike','SHORT_DURATION':'Short Duration','LLM_ANALYSIS':'LLM Analysis','MOMENTUM':'Momentum','COPY_TRADE':'Copy Trade'};
+  const sorted = Object.entries(strategies).sort((a,b) => b[1].count - a[1].count);
+  const maxC = Math.max(...sorted.map(e => e[1].count), 1);
+  const frag = document.createDocumentFragment();
+  sorted.forEach(([type, s]) => {
+    const label = LABELS[type] || type;
+    const closed = s.wins + s.losses;
+    const wr = closed > 0 ? Math.round(s.wins/closed*100) : 0;
+    const wrColor = closed === 0 ? 'var(--dim)' : wr >= 60 ? 'var(--pink)' : wr >= 40 ? 'var(--gold)' : 'var(--red)';
+    const pnlColor = s.pnl >= 0 ? 'var(--pink)' : 'var(--red)';
+    const barW = Math.min(100, (s.count/maxC)*100);
+    const card = document.createElement('div');
+    card.style.cssText = 'background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px;';
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;';
+    const nm = document.createElement('div');
+    nm.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
+    nm.textContent = label;
+    const wrE = document.createElement('div');
+    wrE.style.cssText = 'font-size:18px;font-weight:800;color:'+wrColor+';';
+    wrE.textContent = closed > 0 ? wr+'%' : '\u2014';
+    hdr.append(nm, wrE);
+    const bar = document.createElement('div');
+    bar.style.cssText = 'height:4px;background:rgba(255,255,255,0.05);border-radius:2px;margin-bottom:8px;';
+    const fill = document.createElement('div');
+    fill.style.cssText = 'height:100%;width:'+barW+'%;background:var(--pink);border-radius:2px;';
+    bar.appendChild(fill);
+    const meta = document.createElement('div');
+    meta.style.cssText = 'display:flex;gap:12px;font-size:10px;color:var(--dim);';
+    [[s.count+' trades','var(--dim)'],[s.wins+'W','var(--green)'],[s.losses+'L','var(--red)']].forEach(([t,c]) => { const sp = document.createElement('span'); sp.style.color = c; sp.textContent = t; meta.appendChild(sp); });
+    if (s.open > 0) { const sp = document.createElement('span'); sp.style.color = 'var(--blue)'; sp.textContent = s.open+' open'; meta.appendChild(sp); }
+    const psp = document.createElement('span'); psp.style.cssText = 'color:'+pnlColor+';font-weight:600;'; psp.textContent = (s.pnl>=0?'+':'')+' $'+fmt(Math.abs(s.pnl)); meta.appendChild(psp);
+    card.append(hdr, bar, meta);
+    frag.appendChild(card);
+  });
+  el.replaceChildren(frag);
 }
 
 /* ═══════════════════════════════════════════════
