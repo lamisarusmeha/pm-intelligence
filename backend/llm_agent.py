@@ -129,7 +129,11 @@ async def _call_llm(
                 "and estimate true probabilities based on available evidence. "
                 "You must respond ONLY with valid JSON. No markdown, no explanation outside JSON. "
                 "Be calibrated: if you're unsure, say confidence is low. "
-                "Never recommend a trade unless you see a clear edge (>10% mispricing)."
+                "Never recommend a trade unless you see a clear edge (>10% mispricing). "
+                "CRITICAL SANITY CHECKS: "
+                "1) NEVER bet NO on a condition that is ALREADY TRUE (e.g. if BTC is $69k, do NOT buy NO on 'BTC above $64k'). "
+                "2) NEVER recommend trades where entry price would be >$0.95 or <$0.05 — there is almost no room for profit. "
+                "3) For price/threshold markets, always check if the current value already satisfies the condition."
             ),
         )
 
@@ -610,6 +614,9 @@ def _build_analysis_prompt(
 2. Compare to the market price to identify mispricing
 3. Decide: BUY_YES, BUY_NO, or SKIP
 4. Only recommend BUY if you see >10% edge AND confidence >= 0.6
+5. NEVER bet NO on something ALREADY TRUE (e.g. if BTC=$69k, "BTC above $64k" is already true — do NOT buy NO)
+6. NEVER recommend trades at extreme prices (YES price >$0.95 or <$0.05) — no profit room
+7. For crypto/price markets: verify whether the current price already satisfies the condition BEFORE recommending
 
 Respond with ONLY this JSON (no other text):
 {{
