@@ -21,14 +21,17 @@ binance_prices = {
     "SOL": {"price": 0.0, "timestamp": 0, "prices_5m": deque(maxlen=300), "prices_15m": deque(maxlen=900)},
 }
 
-# REST API config
-BINANCE_REST_URL = "https://api.binance.com/api/v3/ticker/price"
+# REST API config â Binance.us for US servers (Binance.com returns 451)
+BINANCE_US_URL = "https://api.binance.us/api/v3/ticker/price"
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd"
 REST_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 REST_INTERVAL = 3  # seconds between polls
 
-# WebSocket config (backup)
+COINGECKO_MAP = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL"}
+
+# WebSocket config (backup â unlikely to work on US servers)
 STREAMS = ["btcusdt@trade", "ethusdt@trade", "solusdt@trade"]
-COMBINED_URL = f"wss://stream.binance.com:9443/stream?streams={'/'.join(STREAMS)}"
+COMBINED_URL = f"wss://stream.binance.us:9443/stream?streams={'/'.join(STREAMS)}"
 
 SYMBOL_MAP = {
     "BTCUSDT": "BTC", "btcusdt": "BTC",
@@ -91,11 +94,13 @@ def _update_price(symbol: str, price: float):
 
 
 def _fetch_rest_prices() -> dict:
-    """Fetch prices from Binance REST API (synchronous, called in executor)."""
+    """Fetch prices from Binance.us REST API, with CoinGecko fallback."""
     prices = {}
-    for sym in REST_SYMBOLS:
-        try:
-            url = f"{BINANCE_REST_URL}?symbol={sym}"
+
+    # Try Binance.us first (same format as Binance.com, works from US)
+    try:
+        for sym in REST_SYMBOLS:
+            url = f"{BINANCE_US_URL}?symbol={sym}"
             req = urllib.request.Request(url, headers={"User-Agent": "PM-Intelligence/1.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode())
@@ -103,8 +108,23 @@ def _fetch_rest_prices() -> dict:
                 mapped = SYMBOL_MAP.get(sym)
                 if mapped and price > 0:
                     prices[mapped] = price
-        except Exception:
-            continue
+        if prices:
+            return prices
+    except Exception:
+        pass
+
+    # Fallback: CoinGecko (single request for all 3, free, no geo-block)
+    try:
+        req = urllib.request.Request(COINGECKO_URL, headers={"User-Agent": "PM-Intelligence/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            for gecko_id, symbol in COINGECKO_MAP.items():
+                price = data.get(gecko_id, {}).get("usd", 0)
+                if price > 0:
+                    prices[symbol] = float(price)
+    except Exception:
+        pass
+
     return prices
 
 
