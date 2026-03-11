@@ -60,7 +60,7 @@ def _lock_in_exit_params(market: Optional[dict]) -> Tuple[float, float, float]:
 # ââ NEW STRATEGY EXIT CONSTANTS âââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Strategy 1: NEAR_CERTAINTY â hold to resolution
-NEAR_CERTAINTY_HOLD_HOURS = 168.0  # Max 7 days â market should resolve by then
+NEAR_CERTAINTY_HOLD_HOURS = 720.0  # Max 30 days â market should resolve by then
 
 # Strategy 2: VOLUME_SPIKE
 VOLUME_SPIKE_TP         = 0.04   # +4Â¢ take-profit
@@ -196,8 +196,8 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
         return None
 
     # SANITY CHECK: Block extreme prices
-    # NEAR_CERTAINTY is allowed up to 0.92 (that's its sweet spot)
-    max_price = 0.95
+    # NEAR_CERTAINTY is allowed up to 0.97 (ultra-aggressive)
+    max_price = 0.97
     if entry_price > max_price or entry_price < 0.05:
         print(f"[GATE] EXTREME price {entry_price:.4f} â skip '{signal['market_question'][:40]}'")
         return None
