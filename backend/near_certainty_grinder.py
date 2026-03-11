@@ -1,7 +1,7 @@
 """
 Strategy 1: Near-Certainty Grinder
 
-Finds markets at 80%+ probability resolving within 7 days.
+Finds markets at 80%+ probability resolving within 30 days.
 Cross-checks crypto markets against Binance prices.
 Uses Haiku for non-crypto verification.
 
@@ -178,7 +178,7 @@ async def generate_near_certainty_signals(markets: list, binance_prices: dict) -
 
     Filters:
     1. Resolves within 48 hours
-    2. YES or NO price in 0.80-0.92 range
+    2. YES or NO price in 0.80-0.97 range
     3. Liquidity > $20K
     4. Verified (crypto via Binance, non-crypto via Haiku)
 
@@ -188,19 +188,19 @@ async def generate_near_certainty_signals(markets: list, binance_prices: dict) -
 
     for market in markets:
         try:
-            # Filter 1: Resolution within 7 days
+            # Filter 1: Resolution within 30 days
             days = _days_left(market.get("end_date", ""))
-            if days > 7 or days < 0:
+            if days > 30 or days < 0:
                 continue
 
-            # Filter 2: Price in near-certainty zone (0.80-0.95 for favored side)
+            # Filter 2: Price in near-certainty zone (0.80-0.97 for favored side)
             yes_price = market.get("yes_price", 0.5)
             no_price = 1 - yes_price
 
-            if 0.80 <= yes_price <= 0.95:
+            if 0.80 <= yes_price <= 0.97:
                 direction = "YES"
                 entry_price = yes_price
-            elif 0.80 <= no_price <= 0.95:
+            elif 0.80 <= no_price <= 0.97:
                 direction = "NO"
                 entry_price = no_price
             else:
@@ -208,7 +208,7 @@ async def generate_near_certainty_signals(markets: list, binance_prices: dict) -
 
             # Filter 3: Minimum liquidity
             liquidity = market.get("liquidity", 0) or 0
-            if liquidity < 5000:
+            if liquidity < 1000:
                 continue
 
             # Filter 4: Verification
@@ -222,7 +222,7 @@ async def generate_near_certainty_signals(markets: list, binance_prices: dict) -
                 continue
 
             # Score: higher for closer resolution + higher probability
-            score = int(70 + (entry_price - 0.80) * 100 + max(0, (7 - days)) * 2)
+            score = int(70 + (entry_price - 0.80) * 100 + max(0, (30 - days)) * 0.5)
             score = min(99, max(70, score))
 
             signal = {
