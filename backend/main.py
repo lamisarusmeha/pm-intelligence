@@ -40,6 +40,9 @@ from volume_spike_trader import generate_spike_signals
 from binance_arb import generate_arb_signals
 from binance_feed import binance_websocket_loop, binance_prices, get_status as get_binance_status
 
+# Telegram alerts
+import telegram_alerts
+
 # Volume detector (used by Strategy 2)
 from volume_detector import _ensure_tables as init_volume_tables
 
@@ -355,6 +358,7 @@ async def trading_loop():
                 trade = await maybe_enter_trade(sig)
                 if trade:
                     entered += 1
+                    telegram_alerts.alert_trade_entry(trade)
 
             _strategy_debug["total_entered"] += entered
 
@@ -373,6 +377,28 @@ async def trading_loop():
                       f"GRIND={len(grinder_signals)} | "
                       f"entered={entered} | BTC=${btc_price:,.0f} | "
                       f"${portfolio.get('cash_balance',0):,.0f} {wins}W/{losses}L WR={wr_pct}%")
+
+            # -- Telegram: track exits + health summary --------
+            # Check for closed trades (exit alerts)
+            open_now = await db.get_open_paper_trades()
+            open_ids_now = {t["id"] for t in open_now}
+            if hasattr(trading_loop, '_prev_open_ids'):
+                closed_ids = trading_loop._prev_open_ids - open_ids_now
+                if closed_ids:
+                    all_trades = await db.get_all_paper_trades(200)
+                    for t in all_trades:
+                        if t["id"] in closed_ids:
+                            telegram_alerts.alert_trade_exit(t)
+            trading_loop._prev_open_ids = open_ids_now
+
+            # Health summary every ~30 min (600 loops * 3s)
+            if _loop_count % 600 == 0:
+                try:
+                    h_portfolio = await db.get_portfolio()
+                    h_trades = await db.get_all_paper_trades(200)
+                    telegram_alerts.alert_health_summary(h_portfolio, h_trades, get_binance_status(), _loop_count)
+                except Exception:
+                    pass
 
             # ââ Broadcast to dashboard ââââââââââââââââââââââââââââââââââââ
             if _loop_count % 5 == 0:  # Broadcast every 15s (not every 3s)
@@ -410,6 +436,7 @@ async def trading_loop():
 
         except Exception as e:
             print(f"[v3] Loop error: {e}")
+            telegram_alerts.alert_error("trading_loop", str(e))
 
         await asyncio.sleep(LOOP_SLEEP)
 
@@ -442,6 +469,13 @@ async def lifespan(app: FastAPI):
 
     loop_task = asyncio.create_task(trading_loop())
     print("[v3] Trading loop started â 3 strategies active")
+
+    # Telegram alerts
+    if telegram_alerts.is_configured():
+        telegram_alerts.alert_startup()
+        print("[v3] Telegram alerts active")
+    else:
+        print("[v3] Telegram not configured (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)")
     yield
     loop_task.cancel()
     binance_task.cancel()
