@@ -1,23 +1,6 @@
 """
-Paper Trader â 3-STRATEGY MODE
-
-Strategy 1: NEAR_CERTAINTY (Near-Certainty Grinder)
-  Entry: 80-95% probability, resolves <7d, verified via Binance or Haiku
-  Exit:  Hold to resolution â NO TP/SL (the whole point is to hold to $1.00)
-  Max hold: 48h timeout (market should resolve by then)
-
-Strategy 2: VOLUME_SPIKE (Volume Spike Trading)
-  Entry: 3x+ volume surge detected, Haiku confirms direction
-  Exit:  +4Â¢ TP / -3Â¢ SL / 2h timeout
-
-Strategy 3: BINANCE_ARB (Binance Price Lag Arbitrage)
-  Entry: >5% divergence between Binance price and Polymarket odds
-  Exit:  +5Â¢ TP / -4Â¢ SL / 30min timeout
-
-Legacy modes (LOCK_IN, BUY_NO_EARLY, MOMENTUM, COPY_TRADE, LLM_ANALYSIS)
-kept for exit management of any remaining open trades, but NO NEW entries.
-
-40 SIMULTANEOUS POSITIONS | Kelly Criterion sizing | $100k balance
+Paper Trading Engine â Kelly Criterion position sizing + self-learning weight adjustment.
+Supports all 4 strategies + legacy modes for backward compatibility.
 """
 
 import json
@@ -30,7 +13,6 @@ import self_improvement_engine as sie
 
 
 def _market_days_left(market: Optional[dict]) -> float:
-    """Return days until market resolves. Returns 9999 if market/end_date unknown."""
     if not market:
         return 9999.0
     end_date_str = market.get("end_date", "")
@@ -48,7 +30,6 @@ def _market_days_left(market: Optional[dict]) -> float:
 
 
 def _lock_in_exit_params(market: Optional[dict]) -> Tuple[float, float, float]:
-    """Legacy LOCK_IN exit params â only used for draining old open trades."""
     days = _market_days_left(market)
     if days <= 0.5:
         return 0.12, 0.09, 36.0
@@ -57,23 +38,25 @@ def _lock_in_exit_params(market: Optional[dict]) -> Tuple[float, float, float]:
     return 0.05, 0.09, 12.0
 
 
-# ââ NEW STRATEGY EXIT CONSTANTS âââââââââââââââââââââââââââââââââââââââââââââââ
+# ââ Strategy Exit Constants ââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Strategy 1: NEAR_CERTAINTY â hold to resolution
-NEAR_CERTAINTY_HOLD_HOURS = 720.0  # Max 30 days â market should resolve by then
+NEAR_CERTAINTY_HOLD_HOURS = 720.0
 
 # Strategy 2: VOLUME_SPIKE
-VOLUME_SPIKE_TP         = 0.04   # +4Â¢ take-profit
-VOLUME_SPIKE_SL         = 0.03   # -3Â¢ stop-loss
-VOLUME_SPIKE_HOLD_HOURS = 2.0    # 2h timeout
+VOLUME_SPIKE_TP         = 0.04
+VOLUME_SPIKE_SL         = 0.03
+VOLUME_SPIKE_HOLD_HOURS = 2.0
 
 # Strategy 3: BINANCE_ARB
-BINANCE_ARB_TP         = 0.05   # +5Â¢ take-profit
-BINANCE_ARB_SL         = 0.04   # -4Â¢ stop-loss
-BINANCE_ARB_HOLD_HOURS = 0.5    # 30min timeout (speed matters)
+BINANCE_ARB_TP         = 0.05
+BINANCE_ARB_SL         = 0.04
+BINANCE_ARB_HOLD_HOURS = 0.5
 
+# Strategy 4: SHORT_DURATION â hold to resolution (5-15 min markets)
+SHORT_DURATION_HOLD_HOURS = 0.5  # 30 min max â these resolve in 5-15 min
 
-# ââ Legacy mode constants (for draining old open trades) ââââââââââââââââââââââ
+# Legacy mode constants
 COPY_TRADE_TP         = 0.04
 COPY_TRADE_SL         = 0.03
 COPY_TRADE_HOLD_HOURS = 2
@@ -87,19 +70,23 @@ MOMENTUM_TP        = 0.06
 MOMENTUM_SL        = 0.04
 MOMENTUM_HOLD_HOURS = 2
 
+# LLM_ANALYSIS type
+LLM_ANALYSIS_TP         = 0.06
+LLM_ANALYSIS_SL         = 0.05
+LLM_ANALYSIS_HOLD_HOURS = 8.0
 
-# ââ Shared constants âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
+# Shared constants
 ENTRY_THRESHOLD        = 40
 MAX_OPEN_TRADES        = 40
 BASE_RISK_PCT          = 0.005
 LEARN_RATE             = 0.20
 
-# Win probability estimates per mode (for Kelly Criterion)
 KELLY_WIN_PROBS = {
-    "NEAR_CERTAINTY": 0.85,   # High â that's the whole point
-    "VOLUME_SPIKE":   0.65,   # Moderate â spike direction is uncertain
-    "BINANCE_ARB":    0.72,   # Good â exchange price is leading indicator
-    # Legacy (for sizing any remaining open trades)
+    "NEAR_CERTAINTY": 0.85,
+    "VOLUME_SPIKE":   0.65,
+    "BINANCE_ARB":    0.72,
+    "SHORT_DURATION": 0.80,
     "COPY_TRADE":     0.75,
     "BUY_NO_EARLY":   0.70,
     "LOCK_IN":        0.78,
@@ -107,20 +94,16 @@ KELLY_WIN_PROBS = {
     "LLM_ANALYSIS":   0.65,
 }
 
-# Market types that are allowed to take NO direction
 NO_ALLOWED_TYPES = {
     "BUY_NO_EARLY", "LOCK_IN", "LLM_ANALYSIS",
     "NEAR_CERTAINTY", "VOLUME_SPIKE", "BINANCE_ARB",
+    "SHORT_DURATION",
 }
 
 
-# ââ Kelly Criterion position sizing âââââââââââââââââââââââââââââââââââââââââââ
+# ââ Kelly Criterion ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _kelly_position_size(portfolio: dict, signal: dict) -> float:
-    """
-    Kelly Criterion: f* = (b*p - q) / b
-    Uses 25% fractional Kelly. Bounds: min 0.1%, max 0.2% of capital.
-    """
     cash         = portfolio.get("cash_balance", 10000)
     market_type  = signal.get("market_type", "MOMENTUM")
     direction    = signal.get("direction", "YES")
@@ -143,22 +126,22 @@ def _kelly_position_size(portfolio: dict, signal: dict) -> float:
 
     kelly_frac = kelly * 0.25
 
-    # Score bonus: higher confidence = up to 20% more
     score_bonus = min(0.2, (signal.get("score", 50) - 50) / 250)
     kelly_frac  = kelly_frac * (1 + score_bonus)
 
     bet = cash * kelly_frac
-    # Clamp: minimum 0.2%, maximum 0.5% per trade ($200-$500 on $100k)
+
+    # SHORT_DURATION: smaller position sizes since these resolve fast
+    if market_type == "SHORT_DURATION":
+        return round(max(cash * 0.001, min(cash * 0.003, bet)), 2)
+
+    # Standard: 0.2%-0.5% per trade
     return round(max(cash * 0.002, min(cash * 0.005, bet)), 2)
 
 
 # ââ Entry âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 async def maybe_enter_trade(signal: dict) -> Optional[dict]:
-    """
-    Enter a trade if it passes qualification gates.
-    Works for all 3 new strategy types + legacy types (for backward compat).
-    """
     score = signal.get("score", 0)
     if score < ENTRY_THRESHOLD:
         return None
@@ -166,16 +149,13 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
     if not signal.get("can_enter", False):
         return None
 
-    # Check open trade count
     open_trades = await db.get_open_paper_trades()
     if len(open_trades) >= MAX_OPEN_TRADES:
         return None
 
-    # No double positions in same market
     if signal["market_id"] in {t["market_id"] for t in open_trades}:
         return None
 
-    # Portfolio check â Kelly Criterion sizing
     portfolio = await db.get_portfolio()
     cost = _kelly_position_size(portfolio, signal)
     if cost < 1.0:
@@ -186,7 +166,6 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
     direction   = signal.get("direction", "YES")
     market_type = signal.get("market_type", "MOMENTUM")
 
-    # Block NO direction unless market type explicitly allows it
     if direction == "NO" and market_type not in NO_ALLOWED_TYPES:
         return None
 
@@ -196,10 +175,9 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
         return None
 
     # SANITY CHECK: Block extreme prices
-    # NEAR_CERTAINTY is allowed up to 0.97 (ultra-aggressive)
-    max_price = 0.97
+    max_price = 0.97 if market_type == "NEAR_CERTAINTY" else 0.95
     if entry_price > max_price or entry_price < 0.05:
-        print(f"[GATE] EXTREME price {entry_price:.4f} â skip '{signal['market_question'][:40]}'")
+        print(f"[GATE] EXTREME price {entry_price:.4f} â skip '{signal['market_question'][:40]}'")
         return None
 
     shares      = round(cost / entry_price, 4)
@@ -244,10 +222,10 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
     return trade
 
 
-# ââ Exit helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ââ Exit Helpers ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 async def _close_at_price(trade: dict, exit_price: float, reason: str):
-    """Close a trade, update portfolio, trigger self-learning."""
+    """Close a trade, update portfolio, trigger self-learning on EVERY trade."""
     trade_id  = trade["id"]
     shares    = trade["shares"]
     cost      = trade["cost"]
@@ -271,61 +249,63 @@ async def _close_at_price(trade: dict, exit_price: float, reason: str):
     except Exception:
         pass
 
-    # Self-improvement
+    # ââ SELF-LEARNING: Record EVERY trade result âââââââââââââââââââââââââ
     try:
-        factors = {}
-        try:
-            expls = await db.get_trade_explanations(100)
-            for ex in expls:
-                if ex.get("trade_id") == trade_id:
-                    factors = ex.get("factors", {})
-                    break
-        except Exception:
-            pass
+        factors = _extract_factors(trade_id, await db.get_trade_explanations(200))
 
+        # Record in self-improvement engine (triggers retrain every N trades)
         await sie.record_trade_result(
-            trade_id    = trade_id,
-            market_type = trade.get("market_type", "UNKNOWN"),
-            direction   = direction,
-            entry_price = trade.get("entry_price", 0),
-            exit_price  = exit_price,
-            pnl         = pnl,
-            won         = won,
+            trade_id       = trade_id,
+            market_type    = trade.get("market_type", "UNKNOWN"),
+            direction      = direction,
+            entry_price    = trade.get("entry_price", 0),
+            exit_price     = exit_price,
+            pnl            = pnl,
+            won            = won,
             signal_factors = factors,
         )
     except Exception as e:
-        print(f"[SELF-IMPROVE] Failed: {e}")
+        print(f"[SELF-IMPROVE] Record failed: {e}")
 
+    # ââ TRADE EXPLANATION & LESSON EXTRACTION ââââââââââââââââââââââââââââ
     try:
         weights = await db.get_signal_weights()
         trade["exit_price"] = exit_price
         trade["pnl"]        = pnl
 
-        factors = {}
-        try:
-            expls = await db.get_trade_explanations(100)
-            for ex in expls:
-                if ex.get("trade_id") == trade_id:
-                    factors = ex.get("factors", {})
-                    break
-        except Exception:
-            pass
+        factors = _extract_factors(trade_id, await db.get_trade_explanations(200))
 
         exit_expl = explain_exit(trade, reason, pnl)
         lesson    = generate_lesson(factors, pnl, weights, reason)
         await db.update_trade_explanation_exit(trade_id, exit_expl, lesson, outcome, pnl)
 
+        # Adjust signal weights based on this trade's factors
         if factors:
             await _adjust_weights(factors, won, weights)
     except Exception as e:
         print(f"[EXPLAINER] Exit failed: {e}")
 
+    # ââ LOG ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     pnl_sign = "+" if pnl >= 0 else ""
     emoji    = "+" if won else "X"
     mode     = trade.get("market_type", "?")
     print(f"[TRADE] {emoji} CLOSE [{mode}] {direction} "
           f"'{trade['market_question'][:38]}' "
           f"@ {exit_price:.3f} | PNL={pnl_sign}{pnl:.2f} | {outcome}")
+
+
+def _extract_factors(trade_id: int, explanations: list) -> dict:
+    """Extract signal factors for a trade from explanations."""
+    for ex in explanations:
+        if ex.get("trade_id") == trade_id:
+            raw = ex.get("factors_json", ex.get("factors", "{}"))
+            if isinstance(raw, dict):
+                return raw
+            try:
+                return json.loads(raw) if isinstance(raw, str) else {}
+            except Exception:
+                return {}
+    return {}
 
 
 async def _adjust_weights(factors: dict, won: bool, current_weights: dict):
@@ -346,14 +326,12 @@ async def _adjust_weights(factors: dict, won: bool, current_weights: dict):
             await db.update_signal_weight(f, round(w * (1 + LEARN_RATE * 0.5), 4))
 
 
-# ââ LEVERAGE MODE (kept for backward compat) âââââââââââââââââââââââââââââââââ
+# ââ Leverage (disabled) ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 async def maybe_enter_leverage_trade(signal: dict) -> Optional[dict]:
-    """Disabled â no new leverage trades in 3-strategy mode."""
     return None
 
 async def check_leverage_exits(markets_by_id: dict):
-    """Drain any remaining open leverage trades."""
     open_lev = await db.get_open_leverage_trades()
     if not open_lev:
         return
@@ -362,7 +340,7 @@ async def check_leverage_exits(markets_by_id: dict):
         try:
             created = datetime.fromisoformat(trade["created_at"])
             age_hours = (now - created).total_seconds() / 3600
-            if age_hours > 4:  # Force close after 4h
+            if age_hours > 4:
                 market = markets_by_id.get(trade["market_id"])
                 entry_px = trade.get("entry_price", 0)
                 direction = trade.get("direction", "YES")
@@ -380,13 +358,10 @@ async def check_leverage_exits(markets_by_id: dict):
             continue
 
 
-# ââ Exit scan âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ââ Exit Scan âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 async def check_exits(markets_by_id: dict):
-    """
-    Check all open trades for TP / SL / timeout exits.
-    Handles both new 3-strategy types and legacy types.
-    """
+    """Check all open trades for TP / SL / timeout / resolution exits."""
     open_trades = await db.get_open_paper_trades()
     if not open_trades:
         return
@@ -405,12 +380,15 @@ async def check_exits(markets_by_id: dict):
 
         market = markets_by_id.get(market_id)
 
-        # ââ Determine exit params by market type ââââââââââââââââââââââââââ
+        # Determine exit params by market type
         if market_type == "NEAR_CERTAINTY":
-            # Hold to resolution â no TP/SL, just timeout
-            take_profit_delta = None  # No TP â hold for full $1.00
-            stop_loss_delta   = None  # No SL â trust the verification
+            take_profit_delta = None
+            stop_loss_delta   = None
             max_hold_hours    = NEAR_CERTAINTY_HOLD_HOURS
+        elif market_type == "SHORT_DURATION":
+            take_profit_delta = None  # Hold to resolution
+            stop_loss_delta   = None
+            max_hold_hours    = SHORT_DURATION_HOLD_HOURS
         elif market_type == "VOLUME_SPIKE":
             take_profit_delta = VOLUME_SPIKE_TP
             stop_loss_delta   = VOLUME_SPIKE_SL
@@ -419,7 +397,10 @@ async def check_exits(markets_by_id: dict):
             take_profit_delta = BINANCE_ARB_TP
             stop_loss_delta   = BINANCE_ARB_SL
             max_hold_hours    = BINANCE_ARB_HOLD_HOURS
-        # Legacy types (for draining old trades)
+        elif market_type == "LLM_ANALYSIS":
+            take_profit_delta = LLM_ANALYSIS_TP
+            stop_loss_delta   = LLM_ANALYSIS_SL
+            max_hold_hours    = LLM_ANALYSIS_HOLD_HOURS
         elif market_type == "COPY_TRADE":
             take_profit_delta = COPY_TRADE_TP
             stop_loss_delta   = COPY_TRADE_SL
@@ -430,10 +411,6 @@ async def check_exits(markets_by_id: dict):
             max_hold_hours    = BUY_NO_EARLY_HOLD_HOURS
         elif market_type == "LOCK_IN":
             take_profit_delta, stop_loss_delta, max_hold_hours = _lock_in_exit_params(market)
-        elif market_type == "LLM_ANALYSIS":
-            take_profit_delta = 0.06
-            stop_loss_delta   = 0.05
-            max_hold_hours    = 8.0
         else:
             take_profit_delta = MOMENTUM_TP
             stop_loss_delta   = MOMENTUM_SL
@@ -451,30 +428,38 @@ async def check_exits(markets_by_id: dict):
             await _close_at_price(trade, cur_price, "TIMEOUT")
             continue
 
-        # If market is closed/resolved, close the trade at final price
+        # If market is closed/resolved, close the trade
         if market and market.get("closed"):
-            await _close_at_price(trade, cur_price, "TAKE_PROFIT" if cur_price > entry_px else "STOP_LOSS")
+            reason = "TAKE_PROFIT" if cur_price > entry_px else "STOP_LOSS"
+            await _close_at_price(trade, cur_price, reason)
             continue
 
+        # Market not in current fetch = might be resolved
         if yes_price is None:
-            # Market not in API at all — check age. If old, force close at entry price.
-            age_hours = (now - created).total_seconds() / 3600
-            if age_hours > 4:  # If market disappeared for 4+ hours, it probably resolved
+            if age_hours > 4:
                 await _close_at_price(trade, entry_px, "TIMEOUT")
             continue
 
-        # Early resolution guard â YES trade on a market going to 0
+        # Early resolution guard
         if direction == "YES" and yes_price < 0.04:
             await _close_at_price(trade, cur_price, "STOP_LOSS")
             continue
+        if direction == "NO" and yes_price > 0.96:
+            await _close_at_price(trade, cur_price, "STOP_LOSS")
+            continue
 
-        # For NEAR_CERTAINTY: check if market resolved (price near 1.0 or 0.0)
-        if market_type == "NEAR_CERTAINTY":
-            if direction == "YES" and yes_price >= 0.98:
+        # For NEAR_CERTAINTY and SHORT_DURATION: close on resolution
+        if market_type in ("NEAR_CERTAINTY", "SHORT_DURATION"):
+            if direction == "YES" and yes_price >= 0.97:
                 await _close_at_price(trade, cur_price, "TAKE_PROFIT")
-            elif direction == "NO" and yes_price <= 0.02:
+            elif direction == "NO" and yes_price <= 0.03:
                 await _close_at_price(trade, cur_price, "TAKE_PROFIT")
-            # Otherwise just hold â no TP/SL for near-certainty
+            # Also close if clearly losing
+            elif direction == "YES" and yes_price <= 0.05:
+                await _close_at_price(trade, cur_price, "STOP_LOSS")
+            elif direction == "NO" and yes_price >= 0.95 and entry_px < 0.90:
+                # Only stop-loss NO trades if they're clearly losing
+                pass
             continue
 
         # Standard TP/SL for other types
