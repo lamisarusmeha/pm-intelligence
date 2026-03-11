@@ -2,7 +2,7 @@
 Paper Trader â 3-STRATEGY MODE
 
 Strategy 1: NEAR_CERTAINTY (Near-Certainty Grinder)
-  Entry: 80-92% probability, resolves <48h, verified via Binance or Haiku
+  Entry: 80-95% probability, resolves <7d, verified via Binance or Haiku
   Exit:  Hold to resolution â NO TP/SL (the whole point is to hold to $1.00)
   Max hold: 48h timeout (market should resolve by then)
 
@@ -60,7 +60,7 @@ def _lock_in_exit_params(market: Optional[dict]) -> Tuple[float, float, float]:
 # ââ NEW STRATEGY EXIT CONSTANTS âââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Strategy 1: NEAR_CERTAINTY â hold to resolution
-NEAR_CERTAINTY_HOLD_HOURS = 48.0  # Max 48h â market should resolve by then
+NEAR_CERTAINTY_HOLD_HOURS = 168.0  # Max 7 days â market should resolve by then
 
 # Strategy 2: VOLUME_SPIKE
 VOLUME_SPIKE_TP         = 0.04   # +4Â¢ take-profit
@@ -148,8 +148,8 @@ def _kelly_position_size(portfolio: dict, signal: dict) -> float:
     kelly_frac  = kelly_frac * (1 + score_bonus)
 
     bet = cash * kelly_frac
-    # Clamp: minimum 0.1%, maximum 0.2% per trade ($100-$200 on $100k)
-    return round(max(cash * 0.001, min(cash * 0.002, bet)), 2)
+    # Clamp: minimum 0.2%, maximum 0.5% per trade ($200-$500 on $100k)
+    return round(max(cash * 0.002, min(cash * 0.005, bet)), 2)
 
 
 # ââ Entry âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
@@ -197,7 +197,7 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
 
     # SANITY CHECK: Block extreme prices
     # NEAR_CERTAINTY is allowed up to 0.92 (that's its sweet spot)
-    max_price = 0.92 if market_type == "NEAR_CERTAINTY" else 0.95
+    max_price = 0.95
     if entry_price > max_price or entry_price < 0.05:
         print(f"[GATE] EXTREME price {entry_price:.4f} â skip '{signal['market_question'][:40]}'")
         return None
