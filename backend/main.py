@@ -7,7 +7,6 @@ Architecture:
   NEW: Memory system tracks reasoning chains and learns from outcomes
   NEW: Volume spike detector identifies insider-like activity
   NEW: Research agent gathers news context (free APIs, no LLM cost)
-
 Cost control:
   - Haiku ($0.25/M) screens all markets
   - Sonnet ($3/M) only for >12% edge opportunities
@@ -74,7 +73,7 @@ def _auth_required():
         headers={"WWW-Authenticate": 'Basic realm="PM Intelligence"'},
     )
 
-BASE_DIR     = Path(__file__).parent.parent
+BASE_DIR     = Path(__file__).parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 INDEX_HTML   = FRONTEND_DIR / "index.html"
 
