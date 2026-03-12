@@ -1,13 +1,20 @@
 """
-PM Intelligence v3.1 â 4-Strategy Self-Learning Trading Agent
+PM Intelligence v4.0 â 5-Strategy Self-Learning Trading Agent
 
 Strategies:
 1. Near-Certainty Grinder â scans for 80-97% likely outcomes
 2. Volume Spike Trading â detects 3x+ volume anomalies
 3. Binance Price Lag Arbitrage â exploits Polymarket lag behind Binance
-4. Short-Duration 5m/15m Markets â rolling crypto up/down markets (NEW)
+4. Short-Duration 5m/15m Markets â rolling crypto up/down markets
+5. Cross-Market Arbitrage Scanner â pricing anomaly detection (NEW v4.0)
 
 Plus: LLM analysis cycle for general market screening
+
+V4.0 ADDITIONS:
+- Arbitrage scanner integration (Strategy 5)
+- Risk status API endpoint (/api/risk)
+- Portfolio circuit breaker status in broadcasts
+- Strategy-specific stop-losses, range blacklisting (in paper_trader)
 """
 
 import asyncio
@@ -29,11 +36,13 @@ from paper_trader import (
     maybe_enter_trade, check_exits,
     check_leverage_exits,
     _learning_errors,
+    get_risk_status,
 )
 from near_certainty_grinder import generate_near_certainty_signals
 from volume_spike_trader import generate_spike_signals
 from binance_arb import generate_arb_signals
 from short_duration_trader import generate_short_duration_signals
+from arbitrage_scanner import scan_arbitrage_opportunities
 from binance_feed import (
     binance_websocket_loop,
     binance_prices,
@@ -99,6 +108,7 @@ _strategy_debug = {
     "grinder_signals": 0,
     "short_duration_signals": 0,
     "llm_signals": 0,
+    "arbitrage_signals": 0,
     "total_entered": 0,
     "trades_closed_this_session": 0,
     "loops_run": 0,
@@ -109,7 +119,7 @@ _strategy_debug = {
 
 @asynccontextmanager
 async def lifespan(app):
-    print("[v3.1] PM Intelligence v3.1 â Starting up")
+    print("[v4.0] PM Intelligence v4.0 â Starting up")
     await db.init_db()
     await memory_system.init_memory()
 
@@ -181,12 +191,12 @@ async def lifespan(app):
     asyncio.create_task(trading_loop())
 
     telegram_alerts.alert_startup()
-    print(f"[v3.1] Dashboard: {'auth-protected' if DASHBOARD_PASSWORD else 'open'}")
-    print(f"[v3.1] Frontend: {INDEX_HTML} (exists={INDEX_HTML.exists()})")
+    print(f"[v4.0] Dashboard: {'auth-protected' if DASHBOARD_PASSWORD else 'open'}")
+    print(f"[v4.0] Frontend: {INDEX_HTML} (exists={INDEX_HTML.exists()})")
 
     yield
 
-    print("[v3.1] Shutting down")
+    print("[v4.0] Shutting down")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -334,6 +344,7 @@ async def seed_weights():
         "volume_spike": 1.5,
         "binance_arb": 1.2,
         "short_duration": 1.3,
+        "arbitrage": 1.0,
         "price_zone": 1.0,
         "liquidity": 1.0,
         "momentum": 1.0,
@@ -468,7 +479,6 @@ async def llm_analysis_cycle(markets: list) -> list:
     signals = []
 
     # Select candidates: prioritize MID-RANGE markets (0.20-0.80) where LLM can find real edges.
-    # Near-certainty markets (>0.80) have no edge â the price already reflects reality.
     mid_range = [
         m for m in markets
         if 0.15 <= m.get("yes_price", 0.5) <= 0.85
@@ -506,7 +516,6 @@ async def llm_analysis_cycle(markets: list) -> list:
             except Exception:
                 pass
 
-            # Get news context (empty string if none)
             news_context = ""
 
             # Run LLM analysis
@@ -533,7 +542,6 @@ async def llm_analysis_cycle(markets: list) -> list:
             edge = abs(result.get("edge", 0))
             confidence = result.get("confidence", 0)
 
-            # Thresholds for learning phase
             if edge < 0.05 or confidence < 0.4:
                 continue
 
@@ -541,7 +549,6 @@ async def llm_analysis_cycle(markets: list) -> list:
             yes_price = market.get("yes_price", 0.5)
             entry_price = yes_price if direction == "YES" else (1 - yes_price)
 
-            # Sanity: reject extreme prices
             if entry_price > 0.95 or entry_price < 0.05:
                 print(f"[LLM] EXTREME PRICE {entry_price:.4f} â skip")
                 continue
@@ -596,12 +603,15 @@ async def llm_analysis_cycle(markets: list) -> list:
 
 async def trading_loop():
     global _loop_count
-    print("[v3.1] PM Intelligence v3.1 â 4-Strategy Trading Agent")
-    print("[v3.1] Strategy 1: Near-Certainty Grinder")
-    print("[v3.1] Strategy 2: Volume Spike Trading")
-    print("[v3.1] Strategy 3: Binance Price Lag Arbitrage")
-    print("[v3.1] Strategy 4: Short-Duration 5m/15m Markets")
-    print("[v3.1] + LLM Analysis Cycle (general screening)")
+    print("[v4.0] PM Intelligence v4.0 â 5-Strategy Trading Agent")
+    print("[v4.0] Strategy 1: Near-Certainty Grinder")
+    print("[v4.0] Strategy 2: Volume Spike Trading")
+    print("[v4.0] Strategy 3: Binance Price Lag Arbitrage")
+    print("[v4.0] Strategy 4: Short-Duration 5m/15m Markets")
+    print("[v4.0] Strategy 5: Cross-Market Arbitrage Scanner (NEW)")
+    print("[v4.0] + LLM Analysis Cycle (general screening)")
+    print("[v4.0] + Portfolio Circuit Breakers (3% daily, 10% drawdown)")
+    print("[v4.0] + Strategy-Specific Stop-Losses + Range Blacklist")
 
     while True:
         try:
@@ -633,6 +643,10 @@ async def trading_loop():
             # ââ Strategy 3: Binance Arb (EVERY loop â speed critical) ââââ
             arb_signals = generate_arb_signals(markets)
             _strategy_debug["arb_signals"] = len(arb_signals)
+
+            # ââ Strategy 5: Cross-Market Arbitrage (EVERY loop) ââââââââââ
+            arb_scan_signals = scan_arbitrage_opportunities(markets)
+            _strategy_debug["arbitrage_signals"] = len(arb_scan_signals)
 
             # ââ Strategy 4: Short-Duration (every 3rd loop) ââââââââââââââ
             short_signals = []
@@ -674,8 +688,8 @@ async def trading_loop():
 
             # ââ Enter trades from ALL strategies âââââââââââââââââââââââââ
             all_signals = (
-                arb_signals + short_signals + spike_signals +
-                grinder_signals + llm_signals
+                arb_signals + arb_scan_signals + short_signals +
+                spike_signals + grinder_signals + llm_signals
             )
             entered = 0
             for sig in all_signals:
@@ -703,14 +717,19 @@ async def trading_loop():
                 total  = wins + losses
                 wr_pct = round(wins / total * 100, 1) if total else 0
 
+                # V4.0: Include risk status in logging
+                risk = get_risk_status()
+                cb_status = "PAUSED" if risk.get("circuit_breaker_active") else "OK"
+
                 print(
-                    f"[v3.1] #{_loop_count}: {len(markets)} mkts | "
-                    f"ARB={len(arb_signals)} SHORT={len(short_signals)} "
+                    f"[v4.0] #{_loop_count}: {len(markets)} mkts | "
+                    f"ARB={len(arb_signals)} ARBS={len(arb_scan_signals)} "
+                    f"SHORT={len(short_signals)} "
                     f"SPIKE={len(spike_signals)} GRIND={len(grinder_signals)} "
                     f"LLM={len(llm_signals)} | "
                     f"entered={entered} | BTC=${btc_price:,.0f} | "
                     f"${portfolio.get('cash_balance',0):,.0f} "
-                    f"{wins}W/{losses}L WR={wr_pct}%"
+                    f"{wins}W/{losses}L WR={wr_pct}% | CB={cb_status}"
                 )
 
             # ââ Track trade closures via Telegram âââââââââââââââââââââââââ
@@ -762,6 +781,9 @@ async def trading_loop():
                 except Exception:
                     pass
 
+                # V4.0: Include risk status in broadcast
+                risk_status = get_risk_status()
+
                 await broadcast({
                     "type":               "update",
                     "portfolio":          portfolio,
@@ -778,11 +800,12 @@ async def trading_loop():
                     "self_improve":       self_improve_stats,
                     "binance_status":     get_binance_status(),
                     "strategy_debug":     _strategy_debug,
+                    "risk_status":        risk_status,
                     "timestamp":          datetime.utcnow().isoformat(),
                 })
 
         except Exception as e:
-            print(f"[v3.1] Loop error: {e}")
+            print(f"[v4.0] Loop error: {e}")
             telegram_alerts.alert_error("trading_loop", str(e))
 
         await asyncio.sleep(LOOP_SLEEP)
@@ -866,6 +889,7 @@ async def api_stats():
         "memory": memory,
         "self_improvement": self_improve,
         "strategy_debug": _strategy_debug,
+        "risk_status": get_risk_status(),
     }
 
 
@@ -877,6 +901,12 @@ async def api_strategy_performance():
         return await sie.get_performance_summary()
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/api/risk")
+async def api_risk():
+    """V4.0: Risk management status â daily P&L, drawdown, circuit breakers."""
+    return get_risk_status()
 
 
 @app.get("/api/llm/costs")
@@ -921,6 +951,7 @@ async def api_llm_debug():
         "costs": costs,
         "strategy_debug": _strategy_debug,
         "binance": get_binance_status(),
+        "risk_status": get_risk_status(),
         "last_error": None,
         "learning_errors": _learning_errors,
     }
@@ -973,7 +1004,7 @@ async def api_leverage_trades():
 
 @app.post("/api/leverage/multiplier/{multiplier}")
 async def api_set_multiplier(multiplier: int):
-    return {"status": "disabled", "msg": "Leverage trading is disabled in v3.1"}
+    return {"status": "disabled", "msg": "Leverage trading is disabled in v4.0"}
 
 
 @app.get("/api/live/status")
