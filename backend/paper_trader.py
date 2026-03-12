@@ -1,6 +1,13 @@
 """
-Paper Trading Engine â Kelly Criterion position sizing + self-learning weight adjustment.
-Supports all 4 strategies + legacy modes for backward compatibility.
+Paper Trading Engine v4.0 â Kelly Criterion position sizing + self-learning weight adjustment.
+Supports all 5 strategies + legacy modes for backward compatibility.
+
+V4.0 Changes:
+- Strategy-specific percentage stop-losses (10% crypto, 15% political, 8% arb)
+- Portfolio circuit breakers (3% daily loss limit, 10% drawdown pause)
+- Range/between market blacklist (prevents -$476 disasters)
+- ARBITRAGE market type support
+- Tighter position caps ($100 default, was $150)
 """
 
 import json
@@ -14,6 +21,30 @@ import self_improvement_engine as sie
 
 # Learning error tracking (max 20, FIFO) â exposed via /api/llm/debug
 _learning_errors = []
+
+# ââ Portfolio Circuit Breakers âââââââââââââââââââââââââââââââââââââââââââââââ
+# Track daily P&L for circuit breaker
+_daily_pnl = {"date": "", "total": 0.0, "trades_closed": 0}
+_session_peak_balance = 0.0
+_circuit_breaker_active = False
+_circuit_breaker_reason = ""
+
+DAILY_LOSS_LIMIT_PCT = 0.03      # 3% of portfolio = ~$3,000 on $100k
+DRAWDOWN_PAUSE_PCT = 0.10        # 10% drawdown from peak pauses everything
+
+# Words that indicate range/between markets (blacklisted for NEAR_CERTAINTY)
+RANGE_BLACKLIST_WORDS = ("between", "be between", "range")
+
+# Strategy-specific percentage stop-losses
+PCT_STOP_LOSS = {
+    "BINANCE_ARB": 0.08,       # 8% â very short hold, cut fast
+    "SHORT_DURATION": 0.10,    # 10% â fast crypto markets, 20% is already dead
+    "NEAR_CERTAINTY": 0.12,    # 12% â tighter than before (was 20%)
+    "VOLUME_SPIKE": 0.15,      # 15%
+    "LLM_ANALYSIS": 0.15,      # 15%
+    "ARBITRAGE": 1.0,          # 100% â risk-free, never stop out
+}
+DEFAULT_PCT_STOP_LOSS = 0.20    # 20% for legacy types
 
 
 def _market_days_left(market: Optional[dict]) -> float:
@@ -42,6 +73,15 @@ def _lock_in_exit_params(market: Optional[dict]) -> Tuple[float, float, float]:
     return 0.05, 0.09, 12.0
 
 
+def _is_crypto_market(question: str) -> bool:
+    """Check if a market is crypto-related (needs tighter stop-loss)."""
+    q = question.lower()
+    return any(w in q for w in (
+        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+        "crypto", "xrp", "doge", "up or down",
+    ))
+
+
 # ââ Strategy Exit Constants ââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Strategy 1: NEAR_CERTAINTY â hold to resolution
@@ -57,6 +97,9 @@ BINANCE_ARB_HOLD_HOURS = 0.15
 
 # Strategy 4: SHORT_DURATION â hold to resolution (5-15 min markets)
 SHORT_DURATION_HOLD_HOURS = 0.5  # 30 min max â these resolve in 5-15 min
+
+# Strategy 5: ARBITRAGE â hold to resolution
+ARBITRAGE_HOLD_HOURS = 48.0
 
 # Legacy mode constants
 COPY_TRADE_TP         = 0.04
@@ -89,6 +132,7 @@ KELLY_WIN_PROBS = {
     "VOLUME_SPIKE":   0.65,
     "BINANCE_ARB":    0.72,
     "SHORT_DURATION": 0.80,
+    "ARBITRAGE":      0.99,
     "COPY_TRADE":     0.75,
     "BUY_NO_EARLY":   0.70,
     "LOCK_IN":        0.78,
@@ -99,31 +143,92 @@ KELLY_WIN_PROBS = {
 NO_ALLOWED_TYPES = {
     "BUY_NO_EARLY", "LOCK_IN", "LLM_ANALYSIS",
     "NEAR_CERTAINTY", "VOLUME_SPIKE", "BINANCE_ARB",
-    "SHORT_DURATION",
+    "SHORT_DURATION", "ARBITRAGE",
 }
 
-MAX_POS_NEAR_CERT_HIGH  = 150
-MAX_POS_NEAR_CERT_MED   = 100
+MAX_POS_NEAR_CERT       = 100   # was 150 â tighter cap
 MAX_POS_BINANCE_ARB     = 75
 MAX_POS_SHORT_DURATION  = 100
-MAX_POS_DEFAULT         = 150
+MAX_POS_ARBITRAGE       = 500   # risk-free, larger positions OK
+MAX_POS_LLM             = 150
+MAX_POS_DEFAULT         = 100   # was 150
+
+
+# ââ Risk Status (exposed via API) âââââââââââââââââââââââââââââââââââââââââââ
+
+def get_risk_status() -> dict:
+    """Return current risk engine state for API/dashboard."""
+    return {
+        "daily_pnl": round(_daily_pnl.get("total", 0), 2),
+        "daily_date": _daily_pnl.get("date", ""),
+        "daily_trades_closed": _daily_pnl.get("trades_closed", 0),
+        "session_peak_balance": round(_session_peak_balance, 2),
+        "circuit_breaker_active": _circuit_breaker_active,
+        "circuit_breaker_reason": _circuit_breaker_reason,
+        "daily_loss_limit_pct": DAILY_LOSS_LIMIT_PCT,
+        "drawdown_pause_pct": DRAWDOWN_PAUSE_PCT,
+        "pct_stop_losses": PCT_STOP_LOSS,
+    }
+
+
+def _update_daily_pnl(pnl: float):
+    """Track daily P&L for circuit breaker."""
+    global _circuit_breaker_active, _circuit_breaker_reason
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if _daily_pnl["date"] != today:
+        _daily_pnl["date"] = today
+        _daily_pnl["total"] = 0.0
+        _daily_pnl["trades_closed"] = 0
+        _circuit_breaker_active = False
+        _circuit_breaker_reason = ""
+    _daily_pnl["total"] += pnl
+    _daily_pnl["trades_closed"] += 1
+
+
+def _check_circuit_breakers(portfolio: dict) -> bool:
+    """Check if circuit breakers should block new entries. Returns True if blocked."""
+    global _circuit_breaker_active, _circuit_breaker_reason, _session_peak_balance
+
+    cash = portfolio.get("cash_balance", 100000)
+    invested = portfolio.get("total_invested", 0)
+    total_value = cash + invested
+
+    # Update peak balance
+    if total_value > _session_peak_balance:
+        _session_peak_balance = total_value
+
+    # Check daily loss limit (3% of portfolio)
+    daily_limit = total_value * DAILY_LOSS_LIMIT_PCT
+    if _daily_pnl.get("total", 0) < -daily_limit:
+        _circuit_breaker_active = True
+        _circuit_breaker_reason = f"Daily loss ${_daily_pnl['total']:.2f} exceeds {DAILY_LOSS_LIMIT_PCT*100:.0f}% limit (${-daily_limit:.2f})"
+        return True
+
+    # Check drawdown from peak (10%)
+    if _session_peak_balance > 0:
+        drawdown = (_session_peak_balance - total_value) / _session_peak_balance
+        if drawdown >= DRAWDOWN_PAUSE_PCT:
+            _circuit_breaker_active = True
+            _circuit_breaker_reason = f"Drawdown {drawdown*100:.1f}% from peak ${_session_peak_balance:,.0f} exceeds {DRAWDOWN_PAUSE_PCT*100:.0f}% limit"
+            return True
+
+    return False
 
 
 # ââ Position Cap âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _get_position_cap(signal: dict) -> float:
     market_type = signal.get("market_type", "")
-    direction = signal.get("direction", "YES")
-    yes_price = signal.get("yes_price", 0.5)
-    entry_price = yes_price if direction == "YES" else (1 - yes_price)
     if market_type == "BINANCE_ARB":
         return MAX_POS_BINANCE_ARB
     if market_type == "SHORT_DURATION":
         return MAX_POS_SHORT_DURATION
+    if market_type == "ARBITRAGE":
+        return MAX_POS_ARBITRAGE
+    if market_type == "LLM_ANALYSIS":
+        return MAX_POS_LLM
     if market_type == "NEAR_CERTAINTY":
-        if entry_price >= 0.90:
-            return MAX_POS_NEAR_CERT_HIGH
-        return MAX_POS_NEAR_CERT_MED
+        return MAX_POS_NEAR_CERT
     return MAX_POS_DEFAULT
 
 
@@ -159,6 +264,11 @@ def _kelly_position_size(portfolio: dict, signal: dict) -> float:
 
     cap = _get_position_cap(signal)
 
+    # ARBITRAGE: larger positions since risk-free
+    if market_type == "ARBITRAGE":
+        bet = max(cash * 0.003, min(cash * 0.005, bet))
+        return round(min(bet, cap), 2)
+
     # SHORT_DURATION: smaller position sizes since these resolve fast
     if market_type == "SHORT_DURATION":
         bet = max(cash * 0.001, min(cash * 0.003, bet))
@@ -187,6 +297,13 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
         return None
 
     portfolio = await db.get_portfolio()
+
+    # ââ CIRCUIT BREAKER CHECK ââââââââââââââââââââââââââââââââââââââââââââ
+    if _check_circuit_breakers(portfolio):
+        if signal.get("market_type") != "ARBITRAGE":  # Allow risk-free trades
+            print(f"[GATE] CIRCUIT BREAKER: {_circuit_breaker_reason}")
+            return None
+
     cost = _kelly_position_size(portfolio, signal)
     if cost < 1.0:
         return None
@@ -203,6 +320,14 @@ async def maybe_enter_trade(signal: dict) -> Optional[dict]:
     entry_price = yes_price if direction == "YES" else (1 - yes_price)
     if entry_price <= 0:
         return None
+
+    # ââ RANGE MARKET BLACKLIST âââââââââââââââââââââââââââââââââââââââââââ
+    # Prevents disasters like -$476 on "BTC between $70-72k"
+    question_lower = signal.get("market_question", "").lower()
+    if market_type in ("NEAR_CERTAINTY", "LLM_ANALYSIS"):
+        if any(word in question_lower for word in RANGE_BLACKLIST_WORDS):
+            print(f"[GATE] RANGE market blacklisted â skip '{signal['market_question'][:40]}'")
+            return None
 
     # SANITY CHECK: Block extreme prices
     max_price = 0.93 if market_type == "NEAR_CERTAINTY" else 0.95
@@ -272,6 +397,9 @@ async def _close_at_price(trade: dict, exit_price: float, reason: str):
     await db.close_paper_trade(trade_id, exit_price, pnl, outcome)
     await db.update_portfolio(cash_delta=payout, pnl_delta=pnl,
                                invested_delta=-cost, win=won)
+
+    # ââ UPDATE DAILY P&L FOR CIRCUIT BREAKER ââââââââââââââââââââââââââ
+    _update_daily_pnl(pnl)
 
     pnl_pct = round((pnl / cost) * 100, 1) if cost else 0
     try:
@@ -441,6 +569,10 @@ async def check_exits(markets_by_id: dict):
             take_profit_delta = None
             stop_loss_delta   = None
             max_hold_hours    = BINANCE_ARB_HOLD_HOURS
+        elif market_type == "ARBITRAGE":
+            take_profit_delta = None
+            stop_loss_delta   = None
+            max_hold_hours    = ARBITRAGE_HOLD_HOURS
         elif market_type == "LLM_ANALYSIS":
             take_profit_delta = LLM_ANALYSIS_TP
             stop_loss_delta   = LLM_ANALYSIS_SL
@@ -492,8 +624,8 @@ async def check_exits(markets_by_id: dict):
             await _close_at_price(trade, cur_price, "STOP_LOSS")
             continue
 
-        # For NEAR_CERTAINTY, SHORT_DURATION, and BINANCE_ARB: close on resolution
-        if market_type in ("NEAR_CERTAINTY", "SHORT_DURATION", "BINANCE_ARB"):
+        # For resolution-based strategies: close on resolution + percentage stop-loss
+        if market_type in ("NEAR_CERTAINTY", "SHORT_DURATION", "BINANCE_ARB", "ARBITRAGE"):
             # Take profit: resolved in our favor
             if direction == "YES" and yes_price >= 0.97:
                 await _close_at_price(trade, cur_price, "TAKE_PROFIT")
@@ -508,12 +640,19 @@ async def check_exits(markets_by_id: dict):
             if direction == "NO" and yes_price >= 0.95:
                 await _close_at_price(trade, cur_price, "STOP_LOSS")
                 continue
-            # PERCENTAGE STOP-LOSS: cut losses at 20% (the key fix)
-            # Without this, a $150 trade at 0.80 can lose $150 on resolution.
-            # With this, max loss is ~$30 (20% of $150).
-            if entry_px > 0:
+
+            # STRATEGY-SPECIFIC PERCENTAGE STOP-LOSS
+            # V4.0: Different thresholds per strategy type
+            # Crypto direction markets get 10-12%, political gets 15%, arb gets 8%
+            if entry_px > 0 and market_type != "ARBITRAGE":
                 loss_pct = (cur_price - entry_px) / entry_px
-                if loss_pct <= -0.20:
+                # Get strategy-specific stop-loss threshold
+                stop_threshold = PCT_STOP_LOSS.get(market_type, DEFAULT_PCT_STOP_LOSS)
+                # For crypto markets within NEAR_CERTAINTY, use tighter 10%
+                if market_type == "NEAR_CERTAINTY" and _is_crypto_market(trade.get("market_question", "")):
+                    stop_threshold = 0.10
+                if loss_pct <= -stop_threshold:
+                    print(f"[SL] {market_type} {stop_threshold*100:.0f}% stop hit (loss={loss_pct*100:.1f}%)")
                     await _close_at_price(trade, cur_price, "STOP_LOSS")
                     continue
             continue
