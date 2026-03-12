@@ -1,15 +1,14 @@
 """
-Strategy 4: Short-Duration 5m/15m Market Trading
+Strategy 4: Short-Duration 5m/15m Market Trading (v4.0)
 
 Targets Polymarket rolling "Bitcoin/ETH/SOL Up or Down" markets that resolve
 every 5 or 15 minutes. Enters when one side hits 80%+ near expiry.
 
-These markets use slug patterns like:
-  btc-updown-5m-{unix_timestamp}
-  eth-updown-15m-{unix_timestamp}
-
-This strategy should produce the highest trade volume â potentially dozens
-of trades per hour instead of a few per day.
+V4.0 CHANGES:
+- Entry window tightened: 60s for 5m markets (was 180s), 120s for 15m (was 360s)
+- Confidence threshold raised: 80% (was 70%)
+- Binance confirmation REQUIRED â skip trade entirely if unconfirmed
+- Range market blacklist ("between", "range")
 """
 
 import json
@@ -29,7 +28,8 @@ except ImportError:
 # ââ Configuration ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 # Markets must have YES or NO price >= this to qualify
-MIN_CONFIDENCE_PRICE = 0.70
+# V4.0: Raised from 0.70 to 0.80 â only enter when 80%+ one side
+MIN_CONFIDENCE_PRICE = 0.80
 
 # Maximum entry price (don't buy at 0.99 â no upside)
 MAX_ENTRY_PRICE = 0.93
@@ -37,13 +37,17 @@ MAX_ENTRY_PRICE = 0.93
 # Minimum liquidity to enter
 MIN_LIQUIDITY = 100
 
-# How close to expiry (in seconds) before we consider entering
-# For 5m markets: enter in last 120s; for 15m: enter in last 300s
-ENTRY_WINDOW_5M  = 180   # last 3 minutes of a 5-minute market
-ENTRY_WINDOW_15M = 360   # last 6 minutes of a 15-minute market
+# V4.0: Tightened entry windows â enter much closer to resolution
+# For 5m markets: enter in last 60s (was 180s)
+# For 15m markets: enter in last 120s (was 360s)
+ENTRY_WINDOW_5M  = 60    # last 60 seconds of a 5-minute market
+ENTRY_WINDOW_15M = 120   # last 2 minutes of a 15-minute market
 
 # Binance price confirmation threshold
 PRICE_CONFIRM_PCT = 0.001  # 0.1% â if Binance agrees with direction
+
+# V4.0: Range market blacklist â these caused catastrophic losses
+RANGE_BLACKLIST_WORDS = ("between", "be between", "range")
 
 # Slug patterns for short-duration markets
 SHORT_DURATION_PATTERNS = [
@@ -57,10 +61,6 @@ SHORT_DURATION_PATTERNS = [
 ]
 
 # Also match by question text patterns
-# Covers formats like:
-#   "Bitcoin Up or Down - March 11, 1PM ET" (hourly)
-#   "Bitcoin Up or Down - March 11, 1:10PM-1:15PM ET" (5-min range)
-#   "Bitcoin Up or Down - March 11, 10:45AM-11:00AM ET" (15-min range)
 QUESTION_PATTERNS = [
     (re.compile(r"bitcoin\s+up\s+or\s+down", re.IGNORECASE), "BTC"),
     (re.compile(r"btc\s+up\s+or\s+down", re.IGNORECASE), "BTC"),
@@ -98,8 +98,7 @@ def _parse_short_duration_market(market: dict) -> Optional[dict]:
     # Try question-based detection
     for pattern, asset in QUESTION_PATTERNS:
         if pattern.search(question):
-            # First, try to infer timeframe from question text
-            # "1:10PM-1:15PM" = 5min, "10:45AM-11:00AM" = 15min, "1PM ET" = hourly
+            # Infer timeframe from question text
             time_range_match = re.search(
                 r"(\d{1,2}):?(\d{2})?\s*(am|pm)\s*-\s*(\d{1,2}):?(\d{2})?\s*(am|pm)",
                 question, re.IGNORECASE
@@ -109,10 +108,8 @@ def _parse_short_duration_market(market: dict) -> Optional[dict]:
                 question, re.IGNORECASE
             )
 
-            # Determine timeframe
             tf = None
             if time_range_match:
-                # It's a range like "1:10PM-1:15PM" â calculate span
                 h1 = int(time_range_match.group(1))
                 m1 = int(time_range_match.group(2) or 0)
                 ap1 = time_range_match.group(3).upper()
@@ -132,12 +129,11 @@ def _parse_short_duration_market(market: dict) -> Optional[dict]:
                 elif span_minutes <= 60:
                     tf = 60
             elif hourly_match:
-                tf = 60  # Hourly market
+                tf = 60
 
             if tf is None:
                 continue
 
-            # Get resolution time from end_date
             if end_date:
                 try:
                     ed = end_date.replace("Z", "+00:00")
@@ -147,7 +143,6 @@ def _parse_short_duration_market(market: dict) -> Optional[dict]:
                         end_dt = datetime.strptime(ed[:10], "%Y-%m-%d")
                     minutes_left = (end_dt - datetime.utcnow()).total_seconds() / 60
 
-                    # Only match if it resolves within 120 minutes (was 60)
                     if minutes_left <= 120 and minutes_left > -5:
                         return {
                             "asset": asset,
@@ -208,17 +203,25 @@ def generate_short_duration_signals(markets: list) -> list:
     """
     Scan markets for short-duration up/down trading opportunities.
 
-    Logic:
+    V4.0 Logic:
     1. Find 5m/15m up/down markets
-    2. Check if we're in the entry window (near expiry)
-    3. If one side is 75%+, that's a near-certainty at this timeframe
-    4. Cross-check with Binance price direction
-    5. Generate signal for paper_trader
+    2. Check if we're in the entry window (last 60s for 5m, 120s for 15m)
+    3. If one side is 80%+, that's a near-certainty at this timeframe
+    4. REQUIRE Binance price direction confirmation (skip if unconfirmed)
+    5. Blacklist range/between markets
+    6. Generate signal for paper_trader
     """
     signals = []
 
     for market in markets:
         try:
+            question = market.get("question", "")
+            question_lower = question.lower()
+
+            # V4.0: Range market blacklist
+            if any(word in question_lower for word in RANGE_BLACKLIST_WORDS):
+                continue
+
             parsed = _parse_short_duration_market(market)
             if not parsed:
                 continue
@@ -262,7 +265,6 @@ def generate_short_duration_signals(markets: list) -> list:
             # Determine if Binance confirms
             binance_confirms = False
             if binance_dir:
-                question_lower = market.get("question", "").lower()
                 is_up_market = "up" in question_lower and direction == "YES"
                 is_down_market = "down" in question_lower and direction == "YES"
 
@@ -271,22 +273,32 @@ def generate_short_duration_signals(markets: list) -> list:
                 elif is_down_market and binance_dir == "DOWN":
                     binance_confirms = True
                 elif direction == "NO":
-                    # Betting NO on up when Binance says DOWN (or vice versa)
                     if "up" in question_lower and binance_dir == "DOWN":
                         binance_confirms = True
                     elif "down" in question_lower and binance_dir == "UP":
                         binance_confirms = True
 
+            # V4.0: REQUIRE Binance confirmation â skip if unconfirmed
+            # This eliminates wrong-direction entries that caused -$95 and -$97 losses
+            if not binance_confirms:
+                if binance_dir is not None:
+                    # Binance actively disagrees â definitely skip
+                    print(
+                        f"[SHORT] SKIP: {asset} {tf}m {direction}@{entry_price:.2f} â "
+                        f"Binance says {binance_dir}, trade says {direction}"
+                    )
+                continue
+
             # Score calculation
-            # Base: entry_price strength (75% = 70pts, 95% = 90pts)
             score = int(70 + (entry_price - 0.75) * 100)
 
-            # Binance confirmation bonus
-            if binance_confirms:
-                score += 8
+            # Binance confirmation bonus (always confirmed at this point)
+            score += 8
 
             # Time pressure bonus (closer to expiry = more certain)
-            if secs_left < 60:
+            if secs_left < 30:
+                score += 7
+            elif secs_left < 60:
                 score += 5
             elif secs_left < 120:
                 score += 3
@@ -301,7 +313,7 @@ def generate_short_duration_signals(markets: list) -> list:
 
             signal = {
                 "market_id": market.get("id", ""),
-                "market_question": market.get("question", ""),
+                "market_question": question,
                 "score": score,
                 "confidence": entry_price,
                 "direction": direction,
@@ -311,14 +323,14 @@ def generate_short_duration_signals(markets: list) -> list:
                 "entry_reason": (
                     f"SHORT_{tf}m: {direction}@{entry_price:.2f}, "
                     f"{secs_left:.0f}s left, {asset}, "
-                    f"binance={'YES' if binance_confirms else 'NO'}"
+                    f"binance=CONFIRMED"
                 ),
                 "factors_json": json.dumps({
                     "asset": asset,
                     "timeframe_minutes": tf,
                     "entry_price": entry_price,
                     "seconds_left": round(secs_left, 1),
-                    "binance_confirms": binance_confirms,
+                    "binance_confirms": True,
                     "binance_direction": binance_dir,
                     "liquidity": liquidity,
                 }),
@@ -332,7 +344,7 @@ def generate_short_duration_signals(markets: list) -> list:
             print(
                 f"[SHORT] Signal: {asset} {tf}m {direction}@{entry_price:.2f} "
                 f"({secs_left:.0f}s left) "
-                f"binance={'confirmed' if binance_confirms else 'unconfirmed'} "
+                f"binance=CONFIRMED "
                 f"score={score}"
             )
 
